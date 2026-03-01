@@ -1,135 +1,386 @@
-# CLAUDE.md — AI Assistant Guide
+# CLAUDE.md — Руководство для AI-ассистента
 
-## Project Overview
+## Описание проекта
 
-**Repository:** `Kedros64/telegram-channel-land-water`
+**Репозиторий:** `Kedros64/telegram-channel-land-water`
 
-This project is a Telegram channel tool or bot focused on land and water topics. As the codebase evolves, this file will be updated to reflect the actual implementation details, conventions, and workflows.
+Этот репозиторий обеспечивает автоматизацию **Telegram-канала о земельном и водном праве России**.
 
-> **Note:** This repository is in its initial state. This CLAUDE.md establishes baseline conventions for AI assistants contributing to the project. Update this file as the project grows.
+### Тематика канала
+
+Канал публикует:
+- Изменения в земельном и водном законодательстве
+- Оформление водопользования, гидротехнических сооружений (ГТС), прудов, водоёмов
+- Аренду и оформление земельных участков
+- Судебную практику по земельным и водным спорам
+- Абсурдные и показательные бюрократические кейсы из этой сферы
+
+### Бизнес-цель
+
+Привлечение клиентов на услуги по оформлению водопользования, гидротехнических сооружений, земельных участков и всего смежного. Автор канала — консультант в этой сфере.
+
+### Аудитория
+
+Предприниматели, фермеры, арендаторы, управленцы, владельцы участков и водоёмов — люди которым важно: «что это значит для меня на практике».
 
 ---
 
-## Repository Structure
+## Архитектура системы
+
+```
+sources.xlsx
+     │
+     ▼
+scripts/monitor.py          ← читает источники, парсит HTML,
+     │                         оценивает релевантность по ключевым словам,
+     │  (вызывает Claude API)  генерирует готовые посты
+     ▼
+posts/ГГГГ-ММ-ДД_ЧЧ.md    ← сохраняет результат мониторинга
+     │
+     ▼
+scripts/poster.py           ← извлекает блоки «ГОТОВЫЙ ПОСТ:»,
+     │                         конвертирует Markdown → HTML,
+     │                         отправляет через Telegram Bot API
+     ▼
+Telegram Bot API
+     │
+     ▼
+Telegram-канал
+```
+
+Автоматизация запускается через **GitHub Actions** трижды в день:
+- 09:00 МСК (06:00 UTC)
+- 14:00 МСК (11:00 UTC)
+- 19:00 МСК (16:00 UTC)
+
+---
+
+## Структура репозитория
 
 ```
 telegram-channel-land-water/
-├── CLAUDE.md          # This file — AI assistant guide
-└── (source files to be added)
+├── CLAUDE.md                              # Этот файл — руководство AI-ассистента
+├── sources.xlsx                           # Список источников для мониторинга
+├── requirements.txt                       # Зависимости Python
+├── .env.example                           # Пример переменных окружения
+├── .gitignore                             # Исключения git
+├── posts/                                 # Результаты мониторинга и посты
+│   ├── .gitkeep                           # Чтобы папка отслеживалась git
+│   ├── last_check.txt                     # Время последней проверки (UTC ISO)
+│   ├── ГГГГ-ММ-ДД_ЧЧ.md                 # Результат сессии мониторинга
+│   ├── ГГГГ-ММ-ДД_ЧЧ_posted.md          # Опубликованный файл (переименован)
+│   ├── posted.log                         # Лог опубликованных (не в git)
+│   └── errors.log                         # Лог ошибок публикации (не в git)
+└── scripts/
+│   ├── monitor.py                         # Мониторинг + генерация постов
+│   └── poster.py                          # Публикация в Telegram
+└── .github/
+    └── workflows/
+        └── monitor_and_post.yml           # GitHub Actions workflow
 ```
-
-Update this section as directories and files are added.
 
 ---
 
-## Development Workflow
+## Описание скриптов
 
-### Branch Naming
+### scripts/monitor.py
 
-- Feature branches: `feature/<short-description>`
-- Bug fixes: `fix/<short-description>`
-- Claude-managed branches: `claude/<task-id>` (managed automatically)
+**Задача:** Мониторинг источников и генерация постов.
 
-### Commit Messages
+**Алгоритм:**
+1. Читает `sources.xlsx`, фильтрует строки с `active = да`
+2. Для каждого источника типа `site` — HTTP GET + BeautifulSoup парсинг HTML
+3. Пробует несколько CSS-селекторов для поиска новостных блоков (адаптация к разным сайтам)
+4. Оценивает релевантность каждой публикации по ключевым словам (см. ниже)
+5. Выбирает топ-3 наиболее релевантных материала (сортировка по количеству совпадений)
+6. Для каждого генерирует пост через Claude API (`claude-sonnet-4-6`)
+7. Сохраняет результат в `posts/ГГГГ-ММ-ДД_ЧЧ.md`
+8. Обновляет `posts/last_check.txt`
 
-Use clear, imperative commit messages:
+**Переменные окружения:**
+- `ANTHROPIC_API_KEY` — ключ API Claude (Anthropic)
 
+**Особенности:**
+- Если источник недоступен — логирует предупреждение и продолжает с остальными
+- Пауза 1 сек между запросами к сайтам (вежливый краулер)
+- User-Agent имитирует браузер Chrome — снижает риск блокировки
+
+---
+
+### scripts/poster.py
+
+**Задача:** Публикация готовых постов в Telegram-канал.
+
+**Алгоритм:**
+1. Сканирует `posts/*.md` — берёт файлы без суффикса `_posted` и не в `posted.log`
+2. Извлекает блоки `**ГОТОВЫЙ ПОСТ:**` регуляркой
+3. Конвертирует Markdown-разметку в HTML (Telegram parse_mode=HTML)
+4. Отправляет каждый пост через `sendMessage` (Telegram Bot API)
+5. При ошибке разбора HTML — повторяет без разметки
+6. Между постами из одного файла — пауза 30 секунд
+7. При успехе: переименовывает файл (`_posted.md`) и записывает в `posted.log`
+8. При ошибке: записывает в `errors.log`, продолжает со следующим файлом
+
+**Переменные окружения:**
+- `BOT_TOKEN` — токен Telegram-бота
+- `CHANNEL_ID` — ID или @username канала
+
+---
+
+## Файл sources.xlsx
+
+Хранится в корне репозитория. Лист: **Sources**.
+
+| Столбец  | Описание                              |
+|----------|---------------------------------------|
+| `name`   | Название источника (для отображения)  |
+| `url`    | Прямая ссылка                         |
+| `type`   | `telegram` или `site`                 |
+| `active` | `да` / `нет`                          |
+
+Строки с `active = нет` пропускаются при мониторинге без ошибок.
+
+---
+
+## Формат файлов posts/*.md
+
+```markdown
+# Мониторинг ГГГГ-ММ-ДД ЧЧ:ММ
+Проверено источников: N
+Найдено релевантных материалов: M
+
+---
+
+## Пост 1
+
+**Источник:** Название источника — https://example.com/article
+**Суть:** Заголовок материала
+
+**ГОТОВЫЙ ПОСТ:**
+Текст готового поста (800–1500 символов)
+
+**ВАРИАНТЫ CTA:**
+Нейтральный: [вариант]
+С юмором: [вариант]
+Прямой: [вариант]
+
+**ВИЗУАЛ:**
+Prompt (EN): [промпт для генерации изображения]
+Описание (RU): [2–3 слова]
+Запасной вариант: [упрощённый промпт]
+
+---
+## Пост 2
+...
 ```
-Add Telegram bot initialization
-Fix land-parcel data parsing
-Update water quality alert threshold
+
+При отсутствии материалов:
+```markdown
+# Мониторинг ГГГГ-ММ-ДД ЧЧ:ММ
+Проверено источников: N
+Найдено релевантных материалов: 0
+
+[ГГГГ-ММ-ДД][ЧЧ:ММ] — релевантных материалов не найдено. Проверено источников: N
 ```
 
-- Keep the subject line under 72 characters
-- Use the body to explain *why*, not *what*
+---
 
-### Git Workflow
+## Критерии релевантности
+
+### Включающие ключевые слова
+
+земельный, водный, водопользование, Росводресурсы, Росреестр, гидротехнич, пруд, водоём, аренда земли, земельный участок, лесфонд, кадастр, самовольное занятие, штраф, предписание, судебная практика, нарушение водного, нарушение земельного, межевание, сервитут, водоохранная зона, береговая полоса, гидротехническое сооружение, декларация безопасности, Росприроднадзор, Роснедра, Минприроды, земельный кодекс, водный кодекс
+
+### Жёсткие стоп-слова
+
+убийство, теракт, наркотики
+
+Материал считается **нерелевантным** только если содержит стоп-слово **И** не содержит ни одного включающего слова.
+
+---
+
+## Тон и стиль канала
+
+- Лёгкий, немного хулиганский, с аккуратным юмором — без хамства и токсичности
+- Подшучиваем над **ситуациями** и бюрократией — **не над людьми и организациями**
+- Язык живой, без канцелярита; никаких юридических гарантий
+- Формулировки: «как правило», «по практике», «есть риск что», «по сложившейся практике»
+- Если материал о конкретном регионе — упоминаем регион
+- Если упомянут нормативный акт — обязательно называем его
+- В конце подходящих постов — ненавязчивое упоминание, что автор канала занимается оформлением
+
+---
+
+## Настройка автопостинга
+
+### Шаг 1: Создать Telegram-бота и получить BOT_TOKEN
+
+1. Открой [@BotFather](https://t.me/BotFather) в Telegram
+2. Отправь команду `/newbot`
+3. Придумай имя бота (например: `Land Water News Bot`) и username (например: `landwaterbot`)
+4. BotFather пришлёт `BOT_TOKEN` в формате `1234567890:ABCdef...`
+5. Сохрани токен — он понадобится на шаге 4
+
+### Шаг 2: Добавить бота администратором канала
+
+1. Открой настройки своего Telegram-канала
+2. Перейди в **Администраторы → Добавить администратора**
+3. Найди своего бота по username
+4. Включи право **«Публикация сообщений»** (остальные можно отключить)
+5. Сохрани изменения
+
+### Шаг 3: Узнать CHANNEL_ID
+
+- **Публичный канал:** CHANNEL_ID = `@username_канала` (например, `@my_land_channel`)
+- **Приватный канал:** перешли любое сообщение из канала боту [@userinfobot](https://t.me/userinfobot) — он покажет числовой ID в формате `-1001234567890`
+
+### Шаг 4: Получить Anthropic API Key
+
+1. Зарегистрируйся на [console.anthropic.com](https://console.anthropic.com/)
+2. Перейди в **API Keys → Create Key**
+3. Скопируй ключ (начинается с `sk-ant-...`)
+
+### Шаг 5: Добавить секреты в GitHub
+
+1. Открой репозиторий на GitHub
+2. Перейди в **Settings → Secrets and variables → Actions**
+3. Нажми **New repository secret** и добавь по одному:
+   - `ANTHROPIC_API_KEY` — ключ от Anthropic
+   - `BOT_TOKEN` — токен Telegram-бота
+   - `CHANNEL_ID` — ID или @username канала
+
+### Шаг 6: Протестировать
+
+1. Перейди в **Actions → Monitor and Post**
+2. Нажми **Run workflow → Run workflow**
+3. Наблюдай за логами — должны пройти шаги:
+   - `Run monitor` — появится файл `posts/ГГГГ-ММ-ДД_ЧЧ.md`
+   - `Post to Telegram` — посты появятся в канале
+   - `Commit post results` — в репозитории файл переименуется в `_posted.md`
+
+### Шаг 7: Локальное тестирование
 
 ```bash
-# Start a new feature
-git checkout -b feature/<description>
+# Клонировать репозиторий
+git clone https://github.com/Kedros64/telegram-channel-land-water.git
+cd telegram-channel-land-water
 
-# Push to remote
-git push -u origin <branch-name>
+# Установить зависимости
+pip install -r requirements.txt
 
-# Never force-push to main/master
+# Создать .env из примера и заполнить токены
+cp .env.example .env
+nano .env
+
+# Запустить мониторинг
+python scripts/monitor.py
+
+# Опубликовать посты
+python scripts/poster.py
 ```
 
 ---
 
-## Code Conventions
+## Расширение источников
 
-### General
+Чтобы добавить новый сайт для мониторинга:
 
-- Prefer clarity over cleverness
-- Keep functions small and single-purpose
-- Document non-obvious logic with inline comments
-- Avoid over-engineering — implement what is needed now
+1. Открой `sources.xlsx` (Excel / LibreOffice Calc)
+2. Добавь строку в лист **Sources**:
+   - `name` — понятное название (например: `Судебные акты ВС РФ`)
+   - `url` — прямая ссылка на страницу со списком новостей/публикаций
+   - `type` — `site`
+   - `active` — `да`
+3. Сохрани и закоммить: `git add sources.xlsx && git commit -m "Add new source: ..."`
 
-### Environment Variables
-
-- Never hardcode secrets, tokens, or API keys in source files
-- Use a `.env` file for local development (add `.env` to `.gitignore`)
-- Document all required environment variables in a `.env.example` file
-
-Expected variables (update as the project grows):
-
-```
-TELEGRAM_BOT_TOKEN=       # Bot API token from @BotFather
-TELEGRAM_CHANNEL_ID=      # Target channel ID or @username
-```
-
-### Error Handling
-
-- Handle errors at system boundaries (external APIs, user input, file I/O)
-- Log errors with enough context to diagnose issues
-- Do not silently swallow exceptions
+**Совет:** Указывай ссылку на страницу с **архивом/списком** новостей, а не на главную страницу сайта. Например: `https://rosreestr.gov.ru/press/archive/` вместо `https://rosreestr.gov.ru/`.
 
 ---
 
-## Testing
+## Мониторинг Telegram-каналов
 
-Document test commands here as a test suite is established. Example:
+Прямой парсинг Telegram-каналов требует авторизации через **MTProto API** — это сложнее, чем парсинг сайтов.
 
-```bash
-# Run all tests
-pytest
+### Почему нельзя просто так?
 
-# Run a specific test file
-pytest tests/test_bot.py
-```
+Telegram не предоставляет публичного RSS или Bot API для **чтения** чужих каналов. Bot API позволяет только **отправлять** сообщения в каналы, где бот является администратором.
 
-- Write tests for business logic and data-processing functions
-- Do not test framework internals or third-party library behavior
+### Как подключить через Telethon (пошагово)
+
+1. **Зарегистрируйся на [my.telegram.org](https://my.telegram.org)** — нужен номер телефона
+2. **Создай приложение** → получи `API_ID` (число) и `API_HASH` (строка)
+3. **Установи Telethon:** добавь `telethon>=1.36.0` в `requirements.txt`
+4. **Добавь переменные в `.env` и GitHub Secrets:**
+   ```
+   TELEGRAM_API_ID=12345678
+   TELEGRAM_API_HASH=abc123def456...
+   TELEGRAM_SESSION=base64_encoded_session_string
+   ```
+   Сессию можно получить запустив Telethon локально и авторизовавшись.
+5. **Замени заглушку** `fetch_telegram_channel()` в `scripts/monitor.py` на реализацию через `TelegramClient`
+6. **Активируй источники** в `sources.xlsx`: измени `active = нет` → `да` для Telegram-источников
+
+В текущей версии `fetch_telegram_channel()` содержит подробную инструкцию в виде docstring.
 
 ---
 
-## Key Decisions & Context
+## Разработка
 
-| Decision | Rationale |
+### Ветки
+
+- `feature/<описание>` — новые функции
+- `fix/<описание>` — исправление ошибок
+- `claude/<task-id>` — управляемые AI-ассистентом
+
+### Коммиты
+
+```
+Add keyword-based relevance scoring
+Fix poster.py HTML escaping for Telegram
+Update sources.xlsx with new legal portals
+Add Telethon support for Telegram monitoring
+```
+
+Тема коммита — до 72 символов, императивный стиль.
+
+---
+
+## Переменные окружения
+
+| Переменная          | Где используется | Описание                                     |
+|---------------------|------------------|----------------------------------------------|
+| `ANTHROPIC_API_KEY` | `monitor.py`     | Ключ API Claude для генерации постов         |
+| `BOT_TOKEN`         | `poster.py`      | Токен Telegram-бота от @BotFather            |
+| `CHANNEL_ID`        | `poster.py`      | ID или @username Telegram-канала             |
+
+Все переменные хранятся:
+- **Локально:** в файле `.env` (в `.gitignore`, не коммитится)
+- **В CI/CD:** в GitHub Secrets репозитория
+
+---
+
+## Ключевые решения
+
+| Решение | Обоснование |
 |---|---|
-| (none yet) | (add decisions here as they are made) |
+| Claude API для генерации постов | Обеспечивает качественный, стилистически выдержанный текст без ручной работы |
+| Keyword-scoring для релевантности | Быстро и без доп. API-вызовов фильтрует нерелевантные материалы |
+| HTML parse_mode в Telegram | Надёжнее MarkdownV2 — меньше проблем с экранированием спецсимволов |
+| Переименование в `_posted.md` | Состояние публикации видно в git-истории; не зависит от внешних файлов |
+| Пауза 30 сек между постами | Предотвращает флуд-фильтр Telegram и не раздражает подписчиков |
+| `last_check.txt` в git | Состояние проверки сохраняется между запусками workflow |
 
 ---
 
-## Common Tasks for AI Assistants
+## Что нельзя делать
 
-1. **Adding a new feature:** Read existing related code before writing anything. Follow the patterns already established.
-2. **Fixing a bug:** Understand the root cause before changing code. Do not add workarounds that mask the underlying issue.
-3. **Updating dependencies:** Check for breaking changes in changelogs. Run tests after updating.
-4. **Adding environment variables:** Add them to `.env.example` with a comment explaining their purpose.
-5. **Updating this file:** Keep CLAUDE.md current whenever the project structure, conventions, or workflows change significantly.
-
----
-
-## What to Avoid
-
-- Do not commit `.env` files or any file containing real credentials
-- Do not add unnecessary abstractions or generalize prematurely
-- Do not introduce dependencies without a clear reason
-- Do not push directly to `main` or `master`
-- Do not amend commits that have already been pushed
+- Не коммить `.env` — только `.env.example`
+- Не хардкодить токены и ключи в коде
+- Не пушить напрямую в `main`
+- Не удалять `posts/last_check.txt` — это сломает отслеживание новых публикаций
+- Не менять формат блока `**ГОТОВЫЙ ПОСТ:**` без обновления регулярки в `poster.py`
+- Не коммить `sources.xlsx` с реальными credentials или личными данными
 
 ---
 
-*Last updated: 2026-02-28 — Initial scaffold (empty repository)*
+*Последнее обновление: 2026-03-01 — Полная реализация автоматизации*

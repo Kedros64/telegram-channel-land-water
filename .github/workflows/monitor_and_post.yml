@@ -1,0 +1,72 @@
+name: Monitor and Post
+
+on:
+  schedule:
+    - cron: '0 6 * * *'    # 09:00 МСК (UTC+3)
+    - cron: '0 11 * * *'   # 14:00 МСК
+    - cron: '0 16 * * *'   # 19:00 МСК
+  workflow_dispatch:        # Ручной запуск для тестирования
+
+permissions:
+  contents: write           # Нужно для git commit + push результатов
+
+jobs:
+  monitor-and-post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Получаем полную историю, чтобы корректно пушить
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor (collect sources → generate posts)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "=== Запуск мониторинга источников ==="
+          python scripts/monitor.py
+
+      - name: Commit generated posts
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add posts/
+          if git diff --staged --quiet; then
+            echo "Новых файлов нет — коммит не нужен"
+          else
+            git commit -m "Auto: posts $(date +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
+
+      - name: Post to Telegram channel
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: |
+          echo "=== Публикация постов в Telegram ==="
+          python scripts/poster.py
+
+      - name: Commit post results (_posted files)
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # Подтягиваем возможные изменения от предыдущего шага
+          git pull --rebase --autostash
+          git add posts/
+          if git diff --staged --quiet; then
+            echo "Новых изменений после постинга нет"
+          else
+            git commit -m "Auto: mark posted $(date +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
