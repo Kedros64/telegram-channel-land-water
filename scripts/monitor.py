@@ -7,7 +7,7 @@ monitor.py — Мониторинг источников и генерация �
     python scripts/monitor.py
 
 Переменные окружения:
-    ANTHROPIC_API_KEY — ключ API Claude (Anthropic)
+    GEMINI_API_KEY — ключ API Google Gemini
 """
 
 import logging
@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urljoin
 
-import anthropic
+import google.generativeai as genai
 import openpyxl
 import requests
 from bs4 import BeautifulSoup
@@ -36,7 +36,8 @@ POSTS_DIR = REPO_ROOT / "posts"
 SOURCES_FILE = REPO_ROOT / "sources.xlsx"
 LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-2.0-flash"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,10 +90,10 @@ HARD_EXCLUDE_KEYWORDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Промпт для Claude API
+# Промпт для Gemini API
 # ---------------------------------------------------------------------------
 
-CLAUDE_POST_PROMPT = """\
+GEMINI_POST_PROMPT = """\
 Ты — редактор Telegram-канала о земельном и водном праве России.
 Канал читают предприниматели, фермеры, арендаторы, владельцы участков и водоёмов.
 Автор канала — консультант по оформлению водопользования, ГТС, прудов, земельных участков и лесфонда.
@@ -399,13 +400,13 @@ def collect_relevant_articles(sources: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Генерация постов через Claude API
+# Генерация постов через Gemini API
 # ---------------------------------------------------------------------------
 
 
-def generate_post(article: dict, client: anthropic.Anthropic) -> str:
-    """Генерирует готовый пост через Claude API."""
-    prompt = CLAUDE_POST_PROMPT.format(
+def generate_post(article: dict, model: genai.GenerativeModel) -> str:
+    """Генерирует готовый пост через Google Gemini API."""
+    prompt = GEMINI_POST_PROMPT.format(
         title=article.get("title", "Без заголовка"),
         content=(article.get("content") or "")[:2000],
         source_name=article.get("source_name", ""),
@@ -414,13 +415,8 @@ def generate_post(article: dict, client: anthropic.Anthropic) -> str:
 
     log.info("Генерирую пост: «%s»", (article.get("title") or "")[:70])
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    return message.content[0].text
+    response = model.generate_content(prompt)
+    return response.text
 
 
 # ---------------------------------------------------------------------------
@@ -511,23 +507,26 @@ def main() -> None:
         save_last_check(now_utc)
         return
 
-    # 3. Генерируем посты через Claude API
-    if not ANTHROPIC_API_KEY:
+    # 3. Генерируем посты через Gemini API
+    if not GEMINI_API_KEY:
         log.error(
-            "ANTHROPIC_API_KEY не установлен. "
+            "GEMINI_API_KEY не установлен. "
             "Генерация постов невозможна. Добавьте ключ в .env или GitHub Secrets."
         )
         save_last_check(now_utc)
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(GEMINI_MODEL)
+    log.info("Используется модель: %s", GEMINI_MODEL)
+
     articles_with_posts: list[tuple] = []
 
     for article in relevant:
         try:
-            post_text = generate_post(article, client)
+            post_text = generate_post(article, model)
             articles_with_posts.append((article, post_text))
-            time.sleep(2)  # Пауза между вызовами Claude API
+            time.sleep(2)  # Пауза между вызовами Gemini API
         except Exception as exc:
             log.error(
                 "Ошибка генерации поста для «%s»: %s",

@@ -33,7 +33,7 @@ sources.xlsx
      ▼
 scripts/monitor.py          ← читает источники, парсит HTML,
      │                         оценивает релевантность по ключевым словам,
-     │  (вызывает Claude API)  генерирует готовые посты
+     │  (вызывает Gemini API)  генерирует готовые посты
      ▼
 posts/ГГГГ-ММ-ДД_ЧЧ.md    ← сохраняет результат мониторинга
      │
@@ -93,12 +93,12 @@ telegram-channel-land-water/
 3. Пробует несколько CSS-селекторов для поиска новостных блоков (адаптация к разным сайтам)
 4. Оценивает релевантность каждой публикации по ключевым словам (см. ниже)
 5. Выбирает топ-3 наиболее релевантных материала (сортировка по количеству совпадений)
-6. Для каждого генерирует пост через Claude API (`claude-sonnet-4-6`)
+6. Для каждого генерирует пост через Google Gemini API (`gemini-2.0-flash`)
 7. Сохраняет результат в `posts/ГГГГ-ММ-ДД_ЧЧ.md`
 8. Обновляет `posts/last_check.txt`
 
 **Переменные окружения:**
-- `ANTHROPIC_API_KEY` — ключ API Claude (Anthropic)
+- `GEMINI_API_KEY` — ключ Google Gemini API
 
 **Особенности:**
 - Если источник недоступен — логирует предупреждение и продолжает с остальными
@@ -234,18 +234,18 @@ Prompt (EN): [промпт для генерации изображения]
 - **Публичный канал:** CHANNEL_ID = `@username_канала` (например, `@my_land_channel`)
 - **Приватный канал:** перешли любое сообщение из канала боту [@userinfobot](https://t.me/userinfobot) — он покажет числовой ID в формате `-1001234567890`
 
-### Шаг 4: Получить Anthropic API Key
+### Шаг 4: Получить Google Gemini API Key
 
-1. Зарегистрируйся на [console.anthropic.com](https://console.anthropic.com/)
-2. Перейди в **API Keys → Create Key**
-3. Скопируй ключ (начинается с `sk-ant-...`)
+1. Перейди на [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
+2. Нажми **Create API Key**
+3. Скопируй ключ (начинается с `AIza...`)
 
 ### Шаг 5: Добавить секреты в GitHub
 
 1. Открой репозиторий на GitHub
 2. Перейди в **Settings → Secrets and variables → Actions**
 3. Нажми **New repository secret** и добавь по одному:
-   - `ANTHROPIC_API_KEY` — ключ от Anthropic
+   - `GEMINI_API_KEY` — ключ от Google Gemini
    - `BOT_TOKEN` — токен Telegram-бота
    - `CHANNEL_ID` — ID или @username канала
 
@@ -347,11 +347,11 @@ Add Telethon support for Telegram monitoring
 
 ## Переменные окружения
 
-| Переменная          | Где используется | Описание                                     |
-|---------------------|------------------|----------------------------------------------|
-| `ANTHROPIC_API_KEY` | `monitor.py`     | Ключ API Claude для генерации постов         |
-| `BOT_TOKEN`         | `poster.py`      | Токен Telegram-бота от @BotFather            |
-| `CHANNEL_ID`        | `poster.py`      | ID или @username Telegram-канала             |
+| Переменная      | Где используется | Описание                                     |
+|-----------------|------------------|----------------------------------------------|
+| `GEMINI_API_KEY`| `monitor.py`     | Ключ Google Gemini API для генерации постов  |
+| `BOT_TOKEN`     | `poster.py`      | Токен Telegram-бота от @BotFather            |
+| `CHANNEL_ID`    | `poster.py`      | ID или @username Telegram-канала             |
 
 Все переменные хранятся:
 - **Локально:** в файле `.env` (в `.gitignore`, не коммитится)
@@ -363,7 +363,7 @@ Add Telethon support for Telegram monitoring
 
 | Решение | Обоснование |
 |---|---|
-| Claude API для генерации постов | Обеспечивает качественный, стилистически выдержанный текст без ручной работы |
+| Google Gemini API для генерации постов | Быстрая и бесплатная генерация текста; модель `gemini-2.0-flash` |
 | Keyword-scoring для релевантности | Быстро и без доп. API-вызовов фильтрует нерелевантные материалы |
 | HTML parse_mode в Telegram | Надёжнее MarkdownV2 — меньше проблем с экранированием спецсимволов |
 | Переименование в `_posted.md` | Состояние публикации видно в git-истории; не зависит от внешних файлов |
@@ -383,4 +383,4 @@ Add Telethon support for Telegram monitoring
 
 ---
 
-*Последнее обновление: 2026-03-01 — Полная реализация автоматизации*
+*Последнее обновление: 2026-03-01 — Переключение с Anthropic на Google Gemini API*
