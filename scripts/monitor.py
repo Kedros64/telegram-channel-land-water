@@ -10,8 +10,10 @@ monitor.py — Мониторинг источников и генерация �
     GEMINI_API_KEY — ключ API Google Gemini
 """
 
+import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -44,6 +46,9 @@ LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash"
 
+MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
+MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -52,69 +57,28 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Ключевые слова для фильтрации релевантности
+# Промпты для Gemini API
 # ---------------------------------------------------------------------------
 
-INCLUDE_KEYWORDS = [
-    # Земля — ядро
-    "земельный", "земельного", "земельной", "земельных", "земельные",
-    "земля", "земли", "землей", "земель",
-    "земельный участок", "земельного участка", "земельные участки",
-    "участок", "участка", "участки", "участков",
-    "землепользовани",
-    "изъятие земель", "перевод земель", "категория земель",
-    "земельный кодекс",
-    # Вода — ядро
-    "водный", "водного", "водной", "водных",
-    "водопользование", "водопользования",
-    "водоём", "водоема", "водоему", "водоёма",
-    "водохозяйств",
-    "водоохранная зона", "береговая полоса",
-    "водный кодекс",
-    "гидротехнич", "гидротехническое сооружение", "гтс",
-    "декларация безопасности гтс",
-    "пруд", "пруда", "пруду", "прудов",
-    # Ведомства
-    "росводресурсы", "росводресурс",
-    "росреестр", "росреестра",
-    "росприроднадзор",
-    "роснедра", "роснедр", "недропользовани", "недра",
-    "минприроды",
-    # Лес и природные ресурсы
-    "лесфонд", "лесной фонд", "лесной участок", "лесной кодекс",
-    "лесн", "лесопользовани",
-    "природн", "природные ресурсы", "природных ресурсов",
-    "природопользовани",
-    # Кадастр, регистрация, оформление
-    "кадастр", "кадастровый", "кадастровой", "кадастровых",
-    "межевание", "межевой план",
-    "регистрация прав", "регистрации прав",
-    "оформлени",
-    "право собственности",
-    # Аренда и недвижимость
-    "аренда земли", "аренды земли", "аренд",
-    "недвижимост",
-    "сервитут",
-    # Нарушения, санкции, практика
-    "самовольное занятие", "самовольный захват",
-    "предписание",
-    "судебная практика", "судебное решение",
-    "нарушение водного", "нарушение земельного",
-    # Экология
-    "экологич", "экология", "экологии",
-    "природоохранн",
-    "охрана окружающей", "охрана природы",
-    "окружающей среды",
-]
+GEMINI_FILTER_PROMPT = """\
+Ты — редактор Telegram-канала о земельном и водном праве России.
+Вот пронумерованный список заголовков новостей с разных сайтов:
 
-# Жёсткие стоп-слова: нерелевантно ТОЛЬКО если НЕТ ни одного включающего слова
-HARD_EXCLUDE_KEYWORDS = [
-    "убийство", "убит", "теракт", "взрыв", "наркотики", "наркотик",
-]
+{headlines_list}
 
-# ---------------------------------------------------------------------------
-# Промпт для Gemini API
-# ---------------------------------------------------------------------------
+Выбери только те новости, которые касаются:
+- земельного или водного законодательства РФ
+- оформления земли, воды, ГТС, прудов, кадастра
+- судебной практики по земельным и водным темам
+- Росреестра, Росводресурсов, Рослесхоза, Роснедр, Минприроды, Росприроднадзора
+- экологических проверок, штрафов, предписаний по земле и воде
+- аренды земли, межевания, сервитутов, водоохранных зон
+
+Ответь ТОЛЬКО валидным JSON без пояснений и без markdown-обёртки:
+{{"relevant_ids": [1, 3, 5]}}
+
+Если подходящих новостей нет — верни: {{"relevant_ids": []}}
+"""
 
 GEMINI_POST_PROMPT = """\
 Ты — редактор Telegram-канала о земельном и водном праве России.
@@ -241,7 +205,7 @@ def read_sources() -> list[dict]:
 def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
     """
     Получает список статей/новостей с сайта через HTTP GET + BeautifulSoup.
-    Возвращает список словарей: {title, content, url, source_name}.
+    Возвращает до MAX_ARTICLES_PER_SOURCE статей без фильтрации по теме.
     Если источник недоступен — логирует предупреждение и возвращает [].
     """
     url = str(source.get("url", "")).strip()
@@ -259,7 +223,6 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
             tag.decompose()
 
         # Пробуем разные CSS-селекторы для поиска новостных элементов
-        # (разные сайты используют разную разметку)
         news_blocks = []
         selectors_to_try = [
             "article",
@@ -276,7 +239,7 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
         for selector in selectors_to_try:
             found = soup.select(selector)
             if found:
-                news_blocks = found[:20]
+                news_blocks = found[:MAX_ARTICLES_PER_SOURCE]
                 log.debug("Источник '%s': использован селектор '%s'", name, selector)
                 break
 
@@ -285,11 +248,10 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
             for heading in soup.find_all(["h2", "h3", "h4"]):
                 if heading.find("a"):
                     news_blocks.append(heading)
-            news_blocks = news_blocks[:20]
+            news_blocks = news_blocks[:MAX_ARTICLES_PER_SOURCE]
 
         seen_titles: set[str] = set()
         for block in news_blocks:
-            # Извлекаем заголовок и ссылку
             link_tag = block.find("a") if block.name != "a" else block
             if not link_tag:
                 continue
@@ -361,36 +323,14 @@ def fetch_telegram_channel(source: dict, _session: requests.Session) -> list[dic
 
 
 # ---------------------------------------------------------------------------
-# Оценка релевантности
+# Сбор статей со всех источников (без фильтрации)
 # ---------------------------------------------------------------------------
 
 
-def score_relevance(article: dict) -> int:
+def collect_all_articles(sources: list[dict]) -> list[dict]:
     """
-    Оценивает релевантность статьи по ключевым словам.
-    Возвращает счёт >= 1 если релевантно, 0 — если нет.
-    """
-    text = (
-        (article.get("title") or "") + " " + (article.get("content") or "")
-    ).lower()
-
-    # Проверяем жёсткие стоп-слова
-    for stop_kw in HARD_EXCLUDE_KEYWORDS:
-        if stop_kw in text:
-            # Допускаем только если есть хотя бы одно включающее слово
-            has_include = any(kw in text for kw in INCLUDE_KEYWORDS[:6])
-            if not has_include:
-                return 0
-
-    # Считаем совпадения с включающими ключевыми словами
-    score = sum(1 for kw in INCLUDE_KEYWORDS if kw in text)
-    return score
-
-
-def collect_relevant_articles(sources: list[dict]) -> list[dict]:
-    """
-    Обходит все активные источники, собирает статьи,
-    фильтрует по релевантности, возвращает топ-3.
+    Обходит все активные источники, собирает до MAX_ARTICLES_PER_SOURCE
+    статей с каждого сайта. Никакой тематической фильтрации — это делает Gemini.
     """
     session = make_session()
     all_articles: list[dict] = []
@@ -404,22 +344,81 @@ def collect_relevant_articles(sources: list[dict]) -> list[dict]:
             articles = fetch_site_articles(source, session)
             time.sleep(1)  # Вежливая пауза между запросами к сайтам
 
-        for article in articles:
-            score = score_relevance(article)
-            if score > 0:
-                article["score"] = score
-                all_articles.append(article)
+        all_articles.extend(articles)
 
-    # Сортируем по релевантности (больше совпадений = выше)
-    all_articles.sort(key=lambda x: x.get("score", 0), reverse=True)
-    top_articles = all_articles[:3]
+    log.info("Всего собрано статей со всех источников: %d", len(all_articles))
+    return all_articles
 
+
+# ---------------------------------------------------------------------------
+# Фильтрация релевантных статей через Gemini API
+# ---------------------------------------------------------------------------
+
+
+def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
+    """
+    Извлекает список relevant_ids из ответа Gemini.
+    Обрабатывает варианты: чистый JSON, JSON в ```-блоке, частично сломанный ответ.
+    """
+    # Убираем markdown-обёртку если есть
+    clean = re.sub(r"```(?:json)?\s*|\s*```", "", response_text).strip()
+
+    try:
+        data = json.loads(clean)
+        ids = data.get("relevant_ids", [])
+        # Оставляем только корректные числовые ID в допустимом диапазоне
+        return [int(i) for i in ids if isinstance(i, (int, float)) and 1 <= int(i) <= max_id]
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        log.warning("Не удалось разобрать JSON от Gemini: %s | Ответ: %s", exc, clean[:200])
+        return []
+
+
+def filter_relevant_with_gemini(
+    articles: list[dict], model: genai.GenerativeModel
+) -> list[dict]:
+    """
+    Отправляет заголовки всех статей одним запросом в Gemini.
+    Gemini возвращает JSON {"relevant_ids": [...]}.
+    Возвращает отфильтрованный список статей (максимум MAX_POSTS_TO_GENERATE).
+    """
+    if not articles:
+        return []
+
+    # Формируем пронумерованный список заголовков
+    headlines_lines = []
+    for idx, article in enumerate(articles, start=1):
+        source = article.get("source_name", "")
+        title = article.get("title", "").strip()
+        headlines_lines.append(f"{idx}. [{source}] {title}")
+
+    headlines_list = "\n".join(headlines_lines)
+    prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
+
+    log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
+
+    try:
+        response = model.generate_content(prompt)
+        response_text = response.text
+        log.debug("Ответ Gemini (фильтрация): %s", response_text[:300])
+    except Exception as exc:
+        log.error("Ошибка вызова Gemini API при фильтрации: %s", exc)
+        return []
+
+    relevant_ids = _parse_relevant_ids(response_text, max_id=len(articles))
+
+    if not relevant_ids:
+        log.info("Gemini не нашёл релевантных новостей")
+        return []
+
+    relevant_articles = [articles[i - 1] for i in relevant_ids]
     log.info(
-        "Всего релевантных материалов: %d | Выбрано для публикации: %d",
-        len(all_articles),
-        len(top_articles),
+        "Gemini выбрал %d релевантных из %d | IDs: %s",
+        len(relevant_articles),
+        len(articles),
+        relevant_ids,
     )
-    return top_articles
+
+    return relevant_articles[:MAX_POSTS_TO_GENERATE]
 
 
 # ---------------------------------------------------------------------------
@@ -513,36 +512,46 @@ def main() -> None:
     log.info("Текущее время (МСК): %s", now_msk.strftime("%Y-%m-%d %H:%M"))
     log.info("Последняя проверка:  %s", last_check.isoformat())
 
-    # 1. Читаем источники
-    sources = read_sources()
-    if not sources:
-        log.warning("Нет активных источников в sources.xlsx — выходим")
-        save_last_check(now_utc)
-        return
-
-    # 2. Собираем релевантные материалы
-    relevant = collect_relevant_articles(sources)
-
-    if not relevant:
-        log.info("Релевантных материалов не найдено")
-        content = build_output([], now_msk, len(sources))
-        save_output(content, now_msk)
-        save_last_check(now_utc)
-        return
-
-    # 3. Генерируем посты через Gemini API
+    # 1. Проверяем наличие Gemini API ключа сразу — он нужен для обоих шагов
     if not GEMINI_API_KEY:
         log.error(
             "GEMINI_API_KEY не установлен. "
-            "Генерация постов невозможна. Добавьте ключ в .env или GitHub Secrets."
+            "Добавьте ключ в .env или GitHub Secrets."
         )
-        save_last_check(now_utc)
         sys.exit(1)
 
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(GEMINI_MODEL)
     log.info("Используется модель: %s", GEMINI_MODEL)
 
+    # 2. Читаем источники
+    sources = read_sources()
+    if not sources:
+        log.warning("Нет активных источников в sources.xlsx — выходим")
+        save_last_check(now_utc)
+        return
+
+    # 3. Собираем все статьи без фильтрации по ключевым словам
+    all_articles = collect_all_articles(sources)
+
+    if not all_articles:
+        log.info("Ни одной статьи не собрано ни с одного источника")
+        content = build_output([], now_msk, len(sources))
+        save_output(content, now_msk)
+        save_last_check(now_utc)
+        return
+
+    # 4. Фильтруем релевантные через Gemini (один запрос на все заголовки)
+    relevant = filter_relevant_with_gemini(all_articles, model)
+
+    if not relevant:
+        log.info("Релевантных материалов не найдено по оценке Gemini")
+        content = build_output([], now_msk, len(sources))
+        save_output(content, now_msk)
+        save_last_check(now_utc)
+        return
+
+    # 5. Генерируем посты для релевантных статей
     articles_with_posts: list[tuple] = []
 
     for article in relevant:
@@ -557,7 +566,7 @@ def main() -> None:
                 exc,
             )
 
-    # 4. Сохраняем результат
+    # 6. Сохраняем результат
     content = build_output(articles_with_posts, now_msk, len(sources))
     save_output(content, now_msk)
     save_last_check(now_utc)
