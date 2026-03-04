@@ -622,12 +622,40 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
 
 FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к Gemini
 
+# Ключевые слова для fallback-фильтрации (если Gemini API недоступен)
+RELEVANCE_KEYWORDS = [
+    "земельный", "водный", "водопользование", "росводресурсы", "росреестр",
+    "гидротехнич", "пруд", "водоём", "аренда земли", "земельный участок",
+    "лесфонд", "кадастр", "самовольное занятие", "штраф", "предписание",
+    "судебная практика", "межевание", "сервитут", "водоохранная зона",
+    "береговая полоса", "декларация безопасности", "росприроднадзор",
+    "роснедра", "минприроды", "земельный кодекс", "водный кодекс",
+    "участок", "водоем", "росреестр", "недропользован",
+]
+STOP_WORDS = ["убийство", "теракт", "наркотики"]
+
+
+def filter_by_keywords(articles: list[dict]) -> list[dict]:
+    """Fallback-фильтрация по ключевым словам когда Gemini API недоступен."""
+    result = []
+    for article in articles:
+        text = (
+            (article.get("title") or "") + " " + (article.get("content") or "")
+        ).lower()
+        has_stop = any(sw in text for sw in STOP_WORDS)
+        has_keyword = any(kw in text for kw in RELEVANCE_KEYWORDS)
+        if has_keyword and not has_stop:
+            result.append(article)
+    log.info("Keyword-фильтр: %d релевантных из %d", len(result), len(articles))
+    return result
+
 
 def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     """
     Отправляет заголовки статей в Gemini для фильтрации.
     Если заголовков > FILTER_BATCH_SIZE — разбивает на батчи по 80 штук,
     обрабатывает последовательно с паузой 2 сек между батчами.
+    При недоступности Gemini API — fallback на keyword-фильтрацию.
     Возвращает отфильтрованный список статей (максимум MAX_POSTS_TO_GENERATE).
     """
     if not articles:
@@ -645,6 +673,7 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     )
 
     all_relevant: list[dict] = []
+    gemini_failed_batches = 0
 
     for batch_num, batch in enumerate(batches, start=1):
         # Нумерация внутри батча начинается с 1 — IDs локальные
@@ -664,6 +693,7 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
             log.debug("Ответ Gemini (батч %d): %s", batch_num, response_text[:300])
         except Exception as exc:
             log.error("Ошибка Gemini API при фильтрации батча %d: %s", batch_num, exc)
+            gemini_failed_batches += 1
             if batch_num < total_batches:
                 time.sleep(2)
             continue
@@ -679,6 +709,16 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
 
         if batch_num < total_batches:
             time.sleep(2)
+
+    # Если Gemini не ответил ни на один батч — используем keyword-fallback
+    if gemini_failed_batches == total_batches:
+        log.warning(
+            "Gemini API недоступен (все %d батчей упали) — "
+            "переключаюсь на keyword-фильтрацию",
+            total_batches,
+        )
+        fallback = filter_by_keywords(articles)
+        return fallback[:MAX_POSTS_TO_GENERATE]
 
     if not all_relevant:
         log.info("Gemini не нашёл релевантных новостей")
