@@ -48,7 +48,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash-001"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
-MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
+MAX_POSTS_TO_GENERATE = 5     # Сколько постов генерировать за один запуск
 
 # Пути RSS-фидов для перебора (добавляются к базовому URL)
 RSS_CANDIDATE_PATHS = [
@@ -105,7 +105,7 @@ GEMINI_FILTER_PROMPT = """\
 
 {headlines_list}
 
-Выбери только те новости, которые касаются:
+Выбери новости, которые могут быть интересны читателям канала о земле, воде, недвижимости, экологии:
 - земельного или водного законодательства РФ
 - оформления земли, воды, ГТС, прудов, кадастра
 - судебной практики по земельным и водным темам
@@ -565,12 +565,12 @@ def filter_relevant_with_gemini(
     headlines_list = "\n".join(headlines_lines)
     prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
 
-    log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
+    log.info("Первые 5 заголовков: %s", str(headlines_lines[:5]))     log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
 
     try:
         response = model.generate_content(prompt)
         response_text = response.text
-        log.debug("Ответ Gemini (фильтрация): %s", response_text[:300])
+        log.info("Ответ Gemini (фильтрация): %s", response_text[:300])
     except Exception as exc:
         log.error("Ошибка вызова Gemini API при фильтрации: %s", exc)
         return []
