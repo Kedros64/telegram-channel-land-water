@@ -565,7 +565,8 @@ def filter_relevant_with_gemini(
     headlines_list = "\n".join(headlines_lines)
     prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
 
-    log.info("Первые 5 заголовков: %s", str(headlines_lines[:5]))     log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
+    log.info("Первые 5 заголовков: %s", str(headlines_lines[:5]))
+        log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
 
     try:
         response = model.generate_content(prompt)
