@@ -74,8 +74,9 @@ telegram-channel-land-water/
 │   ├── posted.log                         # Лог опубликованных (не в git)
 │   └── errors.log                         # Лог ошибок публикации (не в git)
 └── scripts/
-│   ├── monitor.py                         # Мониторинг + генерация постов (~920 строк)
-│   └── poster.py                          # Публикация в Telegram (~340 строк)
+│   ├── monitor.py                         # Мониторинг + генерация постов (~930 строк)
+│   ├── poster.py                          # Публикация в Telegram (~340 строк)
+│   └── trigger_bot.py                     # Бот для ручного запуска через Telegram
 └── .github/
     └── workflows/
         └── monitor_and_post.yml           # GitHub Actions workflow
@@ -336,6 +337,63 @@ python scripts/poster.py
 
 ---
 
+## Ручной запуск через Telegram (trigger_bot.py)
+
+**Файл:** `scripts/trigger_bot.py`
+
+Позволяет запустить мониторинг в любой момент, отправив `/run` своему боту в Telegram. Бот обращается к GitHub Actions API и запускает тот же `monitor_and_post.yml` workflow.
+
+### Команды бота
+
+| Команда | Действие |
+|---------|---------|
+| `/run` | Немедленный запуск мониторинга и публикации постов |
+| `/status` | Показывает время последней проверки (`last_check.txt`) |
+| `/help` | Список команд |
+
+### Настройка (один раз)
+
+**1. Узнай свой Telegram ID**
+
+Напиши боту [@userinfobot](https://t.me/userinfobot) — он пришлёт числовой ID.
+Добавь в `.env`: `OWNER_CHAT_ID=123456789`
+
+**2. Создай GitHub Personal Access Token**
+
+1. Перейди на GitHub → Settings → Developer settings → Personal access tokens
+2. **Fine-grained tokens** → Generate new token:
+   - Repository access: только `Kedros64/telegram-channel-land-water`
+   - Permissions → Actions: **Read and write**
+3. Скопируй токен, добавь в `.env`: `GITHUB_TOKEN=github_pat_...`
+
+**3. Запусти бота**
+
+```bash
+# Убедись, что .env заполнен (BOT_TOKEN, OWNER_CHAT_ID, GITHUB_TOKEN)
+python scripts/trigger_bot.py
+```
+
+Бот работает в режиме long polling — держи процесс запущенным (в отдельном терминале, tmux, screen или как системный сервис).
+
+### Как работает
+
+1. Бот получает команду `/run` только от `OWNER_CHAT_ID` — чужие сообщения игнорируются
+2. Вызывает GitHub API (`POST /repos/.../actions/workflows/monitor_and_post.yml/dispatches`)
+3. GitHub Actions запускает тот же workflow, что и по расписанию
+4. Посты появляются в канале через 2–3 минуты, результаты коммитятся в git
+
+### Переменные окружения для trigger_bot.py
+
+| Переменная | Обязательная | Описание |
+|------------|-------------|----------|
+| `BOT_TOKEN` | да | Токен бота (уже есть) |
+| `OWNER_CHAT_ID` | да | Числовой Telegram ID владельца |
+| `GITHUB_TOKEN` | да | PAT с правами на Actions |
+| `GITHUB_REPO` | нет | Репозиторий (по умолчанию: `Kedros64/telegram-channel-land-water`) |
+| `GITHUB_BRANCH` | нет | Ветка (по умолчанию: `master`) |
+
+---
+
 ## Расширение источников
 
 Чтобы добавить новый сайт для мониторинга:
@@ -410,11 +468,15 @@ Fix HTML selector threshold for gov sites
 
 ## Переменные окружения
 
-| Переменная      | Где используется | Описание                                     |
-|-----------------|------------------|----------------------------------------------|
-| `GEMINI_API_KEY`| `monitor.py`     | Ключ Google Gemini API для генерации постов  |
-| `BOT_TOKEN`     | `poster.py`      | Токен Telegram-бота от @BotFather            |
-| `CHANNEL_ID`    | `poster.py`      | ID или @username Telegram-канала             |
+| Переменная       | Где используется   | Описание                                                |
+|------------------|--------------------|---------------------------------------------------------|
+| `GEMINI_API_KEY` | `monitor.py`       | Ключ Google Gemini API для генерации постов             |
+| `BOT_TOKEN`      | `poster.py`, `trigger_bot.py` | Токен Telegram-бота от @BotFather          |
+| `CHANNEL_ID`     | `poster.py`        | ID или @username Telegram-канала                        |
+| `OWNER_CHAT_ID`  | `trigger_bot.py`   | Числовой Telegram ID владельца (для ручного запуска)   |
+| `GITHUB_TOKEN`   | `trigger_bot.py`   | PAT с правами Actions для запуска workflow              |
+| `GITHUB_REPO`    | `trigger_bot.py`   | Репозиторий (по умолчанию: `Kedros64/telegram-channel-land-water`) |
+| `GITHUB_BRANCH`  | `trigger_bot.py`   | Ветка для dispatch (по умолчанию: `master`)             |
 
 Все переменные хранятся:
 - **Локально:** в файле `.env` (в `.gitignore`, не коммитится)
