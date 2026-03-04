@@ -1,0 +1,32 @@
+# Переменные окружения — никогда не коммитить
+.env
+
+# Логи публикаций и ошибок — хранятся локально
+posts/posted.log
+posts/errors.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Редакторы
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+desktop.ini
