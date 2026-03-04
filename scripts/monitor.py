@@ -89,6 +89,21 @@ HTML_NEWS_SELECTORS = [
     ".press-release",
     ".news-list__item",
     ".articles-list__item",
+    # Характерные для российских государственных и правовых сайтов
+    ".news-feed__item",
+    ".page-news__item",
+    ".list-news-item",
+    ".document-item",
+    ".event-card",
+    ".news-block__item",
+    ".press-item",
+    ".content-item",
+    ".col-news",
+    ".feed-item",
+    ".law-item",
+    "div.row-item",
+    "tr.news-row",
+    "td.news-title",
 ]
 
 logging.basicConfig(
@@ -496,7 +511,7 @@ def _try_html(url: str, name: str, session: requests.Session) -> list[dict]:
         news_blocks: list = []
         for selector in HTML_NEWS_SELECTORS:
             found = soup.select(selector)
-            if len(found) >= 3:  # Хотя бы 3 блока — похоже на список новостей
+            if len(found) >= 2:  # Хотя бы 2 блока — похоже на список новостей
                 news_blocks = found[:MAX_ARTICLES_PER_SOURCE]
                 log.debug("Источник '%s': HTML-селектор '%s' (%d блоков)", name, selector, len(found))
                 break
