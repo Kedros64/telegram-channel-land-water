@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlparse
 import feedparser
 import urllib3
 
-import google.generativeai as genai
+from google import genai
 import openpyxl
 import requests
 from bs4 import BeautifulSoup
@@ -45,7 +45,7 @@ SOURCES_FILE = REPO_ROOT / "sources.xlsx"
 LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash-001"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
@@ -691,8 +691,12 @@ def main() -> None:
         )
         sys.exit(1)
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
+        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+            class _ModelWrapper:
+        def generate_content(self, prompt):
+            resp = _genai_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+            return resp
+    model = _ModelWrapper()
     log.info("Используется модель: %s", GEMINI_MODEL)
 
     # 2. Читаем источники
