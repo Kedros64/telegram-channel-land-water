@@ -696,7 +696,7 @@ def main() -> None:
         log.info("Используется модель: %s", GEMINI_MODEL)
 
     # 2. Читаем источники
-            sources = load_sources()
+        sources = load_sources()
 if not sources:
         log.warning("Нет активных источников в sources.xlsx — выходим")
         save_last_check(now_utc)
