@@ -622,21 +622,42 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
 
 FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к Gemini
 
-# Ключевые слова для fallback-фильтрации (если Gemini API недоступен)
+# Ключевые слова для пре-фильтрации (до Gemini) и fallback (если Gemini недоступен)
 RELEVANCE_KEYWORDS = [
-    "земельный", "водный", "водопользование", "росводресурсы", "росреестр",
-    "гидротехнич", "пруд", "водоём", "аренда земли", "земельный участок",
-    "лесфонд", "кадастр", "самовольное занятие", "штраф", "предписание",
-    "судебная практика", "межевание", "сервитут", "водоохранная зона",
-    "береговая полоса", "декларация безопасности", "росприроднадзор",
-    "роснедра", "минприроды", "земельный кодекс", "водный кодекс",
-    "участок", "водоем", "росреестр", "недропользован",
+    "земельн",
+    "водн",
+    "гтс",
+    "пруд",
+    "кадастр",
+    "росреестр",
+    "росводресурс",
+    "рослесхоз",
+    "роснедр",
+    "минприрод",
+    "росприроднадзор",
+    "аренда земли",
+    "межеван",
+    "сервитут",
+    "водоохранн",
+    "экологическ",
+    "лесфонд",
+    "недр",
+    "водопользован",
+    "водоём",
+    "водоем",
+    "береговая полоса",
+    "гидротехнич",
 ]
 STOP_WORDS = ["убийство", "теракт", "наркотики"]
 
 
-def filter_by_keywords(articles: list[dict]) -> list[dict]:
-    """Fallback-фильтрация по ключевым словам когда Gemini API недоступен."""
+def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
+    """
+    Пре-фильтрация по ключевым словам.
+    Используется до отправки в Gemini (сокращает батч) и как fallback когда Gemini недоступен.
+    Статья проходит если содержит хотя бы одно ключевое слово в title+content (без учёта регистра)
+    и не содержит жёстких стоп-слов.
+    """
     result = []
     for article in articles:
         text = (
@@ -646,7 +667,6 @@ def filter_by_keywords(articles: list[dict]) -> list[dict]:
         has_keyword = any(kw in text for kw in RELEVANCE_KEYWORDS)
         if has_keyword and not has_stop:
             result.append(article)
-    log.info("Keyword-фильтр: %d релевантных из %d", len(result), len(articles))
     return result
 
 
@@ -717,7 +737,8 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
             "переключаюсь на keyword-фильтрацию",
             total_batches,
         )
-        fallback = filter_by_keywords(articles)
+        fallback = pre_filter_by_keywords(articles)
+        log.info("Keyword-fallback: %d релевантных из %d", len(fallback), len(articles))
         return fallback[:MAX_POSTS_TO_GENERATE]
 
     if not all_relevant:
@@ -844,8 +865,22 @@ def main() -> None:
         save_last_check(now_utc)
         return
 
-    # 4. Фильтруем релевантные через Gemini (один запрос на все заголовки)
-    relevant = filter_relevant_with_gemini(all_articles)
+    # 4. Пре-фильтрация по ключевым словам — отсекаем заведомо нерелевантное до Gemini
+    prefiltered = pre_filter_by_keywords(all_articles)
+    log.info(
+        "Пре-фильтрация по ключевым словам: %d -> %d статей",
+        len(all_articles), len(prefiltered),
+    )
+
+    if not prefiltered:
+        log.info("После keyword-фильтрации статей не осталось — нет релевантных материалов")
+        content = build_output([], now_msk, len(sources))
+        save_output(content, now_msk)
+        save_last_check(now_utc)
+        return
+
+    # 5. Финальная фильтрация через Gemini (работает только с уже отфильтрованным пулом)
+    relevant = filter_relevant_with_gemini(prefiltered)
 
     if not relevant:
         log.info("Релевантных материалов не найдено по оценке Gemini")
@@ -854,7 +889,7 @@ def main() -> None:
         save_last_check(now_utc)
         return
 
-    # 5. Генерируем посты для релевантных статей
+    # 6. Генерируем посты для релевантных статей
     articles_with_posts: list[tuple] = []
 
     for article in relevant:
