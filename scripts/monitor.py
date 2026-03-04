@@ -18,8 +18,9 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+import feedparser
 import urllib3
 
 import google.generativeai as genai
@@ -48,6 +49,44 @@ GEMINI_MODEL = "gemini-2.0-flash"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
+
+# Пути RSS-фидов для перебора (добавляются к базовому URL)
+RSS_CANDIDATE_PATHS = [
+    "/rss",
+    "/rss.xml",
+    "/feed",
+    "/feed.xml",
+    "/atom.xml",
+    "/news/rss",
+    "/news/feed",
+    "/export/rss",
+    "/lenta/rss",
+]
+
+# Расширенный набор CSS-селекторов для HTML-парсинга новостных сайтов
+HTML_NEWS_SELECTORS = [
+    "article",
+    ".news-item",
+    ".article-item",
+    ".news__item",
+    ".b-news-item",
+    ".post-item",
+    ".material-item",
+    ".entry",
+    ".list-item",
+    ".item",
+    ".card",
+    ".news-card",
+    ".publication",
+    ".doc-item",
+    "li.item",
+    "li.news",
+    "li.article",
+    ".pressrelease",
+    ".press-release",
+    ".news-list__item",
+    ".articles-list__item",
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -202,14 +241,170 @@ def read_sources() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
+def _extract_channel_name(url: str) -> str:
+    """Из t.me/channelname или @channelname извлекает имя канала."""
+    url = url.strip().rstrip("/")
+    # Убираем @, если задан как @username
+    if url.startswith("@"):
+        return url.lstrip("@")
+    # Из полного URL берём последний сегмент пути
+    path = urlparse(url).path
+    return path.strip("/").split("/")[0].lstrip("@")
+
+
+def fetch_telegram_channel(source: dict, session: requests.Session) -> list[dict]:
     """
-    Получает список статей/новостей с сайта через HTTP GET + BeautifulSoup.
-    Возвращает до MAX_ARTICLES_PER_SOURCE статей без фильтрации по теме.
-    Если источник недоступен — логирует предупреждение и возвращает [].
+    Парсит публичный веб-вид Telegram-канала через https://t.me/s/{channel}.
+    Работает для всех публичных каналов без API-ключей и MTProto.
+    Если канал приватный или недоступен — логирует предупреждение и возвращает [].
     """
     url = str(source.get("url", "")).strip()
     name = str(source.get("name", url))
+    channel = _extract_channel_name(url)
+
+    if not channel:
+        log.warning("Источник '%s': не удалось извлечь имя канала из URL '%s'", name, url)
+        return []
+
+    web_url = f"https://t.me/s/{channel}"
+    articles = []
+
+    try:
+        resp = session.get(web_url, timeout=30, verify=False)
+        if resp.status_code == 404:
+            log.warning("Источник '%s': канал @%s не найден или приватный", name, channel)
+            return []
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Telegram web view: каждое сообщение — .tgme_widget_message_wrap
+        messages = soup.select(".tgme_widget_message_wrap")
+        # Сообщения идут от старых к новым — берём последние (самые свежие)
+        messages = messages[-MAX_ARTICLES_PER_SOURCE:]
+
+        seen: set[str] = set()
+        for msg in reversed(messages):  # сначала самые новые
+            text_el = msg.select_one(".tgme_widget_message_text")
+            if not text_el:
+                # Пост без текста (только фото/видео) — пропускаем
+                continue
+
+            text = text_el.get_text(separator=" ", strip=True)
+            if len(text) < 30 or text in seen:
+                continue
+            seen.add(text)
+
+            # Ссылка на конкретное сообщение
+            date_el = msg.select_one("a.tgme_widget_message_date")
+            msg_url = (
+                date_el["href"]
+                if date_el and date_el.get("href")
+                else f"https://t.me/{channel}"
+            )
+
+            # Первый абзац/строка — как заголовок
+            first_line = text.split("\n")[0].strip()
+            title = first_line if len(first_line) >= 30 else text[:200]
+
+            articles.append(
+                {
+                    "title": title[:200],
+                    "content": text[:600],
+                    "url": msg_url,
+                    "source_name": name,
+                }
+            )
+
+        log.info("Источник '%s' (@%s): найдено сообщений — %d", name, channel, len(articles))
+
+    except requests.exceptions.Timeout:
+        log.warning("Источник '%s' (@%s): таймаут запроса", name, channel)
+    except requests.exceptions.ConnectionError as exc:
+        log.warning("Источник '%s' (@%s): ошибка соединения — %s", name, channel, exc)
+    except requests.exceptions.HTTPError as exc:
+        log.warning("Источник '%s' (@%s): HTTP-ошибка — %s", name, channel, exc)
+    except Exception as exc:
+        log.warning("Источник '%s' (@%s): непредвиденная ошибка — %s", name, channel, exc)
+
+    return articles
+
+
+def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
+    """
+    Пробует найти и распарсить RSS/Atom-фид сайта.
+    Возвращает список статей или [] если RSS не найден/недоступен.
+    """
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Проверяем: сам URL + стандартные RSS-пути
+    candidates = [base_url] + [origin + path for path in RSS_CANDIDATE_PATHS]
+
+    for rss_url in candidates:
+        try:
+            resp = session.get(rss_url, timeout=15, verify=False)
+            if not resp.ok:
+                continue
+
+            ct = resp.headers.get("content-type", "")
+            text = resp.text.strip()
+            is_feed = (
+                "xml" in ct
+                or "rss" in ct
+                or "atom" in ct
+                or text.startswith("<?xml")
+                or "<rss" in text[:500]
+                or "<feed" in text[:500]
+            )
+            if not is_feed:
+                continue
+
+            feed = feedparser.parse(text)
+            if not feed.entries:
+                continue
+
+            articles = []
+            for entry in feed.entries[:MAX_ARTICLES_PER_SOURCE]:
+                title = (entry.get("title") or "").strip()
+                if not title or len(title) < 10:
+                    continue
+
+                # summary может содержать HTML — чистим
+                raw_summary = (
+                    entry.get("summary")
+                    or entry.get("description")
+                    or entry.get("content", [{}])[0].get("value", "")
+                )
+                summary_text = BeautifulSoup(raw_summary, "lxml").get_text(
+                    separator=" ", strip=True
+                )[:600]
+
+                articles.append(
+                    {
+                        "title": title,
+                        "content": summary_text,
+                        "url": entry.get("link", base_url),
+                        "source_name": name,
+                    }
+                )
+
+            if articles:
+                log.info(
+                    "Источник '%s': RSS найден (%s), статей: %d",
+                    name, rss_url, len(articles),
+                )
+                return articles
+
+        except Exception:
+            continue  # Этот кандидат не подошёл — пробуем следующий
+
+    return []
+
+
+def _try_html(url: str, name: str, session: requests.Session) -> list[dict]:
+    """
+    Парсит HTML-страницу сайта: пробует CSS-селекторы, затем заголовки h2/h3/h4.
+    """
     articles = []
 
     try:
@@ -218,32 +413,19 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
         resp.encoding = resp.apparent_encoding or "utf-8"
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # Удаляем шум: навигацию, подвал, скрипты
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
             tag.decompose()
 
-        # Пробуем разные CSS-селекторы для поиска новостных элементов
-        news_blocks = []
-        selectors_to_try = [
-            "article",
-            ".news-item",
-            ".article-item",
-            ".post-item",
-            ".material-item",
-            ".b-news-item",
-            ".news__item",
-            ".entry",
-            ".list-item",
-            "li.item",
-        ]
-        for selector in selectors_to_try:
+        # Перебираем CSS-селекторы
+        news_blocks: list = []
+        for selector in HTML_NEWS_SELECTORS:
             found = soup.select(selector)
-            if found:
+            if len(found) >= 3:  # Хотя бы 3 блока — похоже на список новостей
                 news_blocks = found[:MAX_ARTICLES_PER_SOURCE]
-                log.debug("Источник '%s': использован селектор '%s'", name, selector)
+                log.debug("Источник '%s': HTML-селектор '%s' (%d блоков)", name, selector, len(found))
                 break
 
-        # Fallback: ищем все заголовки (h2/h3/h4) со ссылками
+        # Fallback: любые заголовки со ссылкой
         if not news_blocks:
             for heading in soup.find_all(["h2", "h3", "h4"]):
                 if heading.find("a"):
@@ -279,47 +461,36 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
                 }
             )
 
-        log.info("Источник '%s': найдено элементов — %d", name, len(articles))
-
     except requests.exceptions.Timeout:
-        log.warning("Источник '%s': таймаут запроса (30 сек)", name)
+        log.warning("Источник '%s': таймаут запроса HTML (30 сек)", name)
     except requests.exceptions.ConnectionError as exc:
-        log.warning("Источник '%s': ошибка соединения — %s", name, exc)
+        log.warning("Источник '%s': ошибка соединения HTML — %s", name, exc)
     except requests.exceptions.HTTPError as exc:
-        log.warning("Источник '%s': HTTP-ошибка — %s", name, exc)
+        log.warning("Источник '%s': HTTP-ошибка HTML — %s", name, exc)
     except Exception as exc:
-        log.warning("Источник '%s': непредвиденная ошибка — %s", name, exc)
+        log.warning("Источник '%s': непредвиденная ошибка HTML — %s", name, exc)
 
     return articles
 
 
-def fetch_telegram_channel(source: dict, _session: requests.Session) -> list[dict]:
+def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
     """
-    ЗАГЛУШКА для мониторинга Telegram-каналов.
-
-    Прямой парсинг Telegram-каналов требует авторизации через MTProto API.
-    Для полноценной реализации используйте Telethon или Pyrogram:
-
-        1. Зарегистрируйтесь на https://my.telegram.org
-        2. Создайте приложение → получите API_ID и API_HASH
-        3. Установите: pip install telethon>=1.36.0
-        4. Добавьте переменные в .env:
-               TELEGRAM_API_ID=12345678
-               TELEGRAM_API_HASH=abc123def456...
-               TELEGRAM_SESSION=base64_encoded_session_string
-        5. Замените эту функцию на реализацию через TelegramClient
-        6. Активируйте источник в sources.xlsx (active = да)
-
-    Подробнее — см. раздел "Мониторинг Telegram-каналов" в CLAUDE.md.
+    Получает статьи с сайта: сначала пробует RSS, потом HTML-парсинг.
+    Возвращает до MAX_ARTICLES_PER_SOURCE статей.
     """
-    name = str(source.get("name", source.get("url", "Unknown")))
-    log.info(
-        "Источник '%s' (telegram) — пропущен. "
-        "Мониторинг Telegram-каналов требует отдельной настройки MTProto. "
-        "Инструкция: см. CLAUDE.md → раздел 'Мониторинг Telegram-каналов'.",
-        name,
-    )
-    return []
+    url = str(source.get("url", "")).strip()
+    name = str(source.get("name", url))
+
+    # Шаг 1: RSS (надёжнее, структурированные данные)
+    articles = _try_rss(url, name, session)
+    if articles:
+        return articles
+
+    # Шаг 2: HTML-парсинг как fallback
+    log.debug("Источник '%s': RSS не найден, пробую HTML-парсинг…", name)
+    articles = _try_html(url, name, session)
+    log.info("Источник '%s': найдено элементов (HTML) — %d", name, len(articles))
+    return articles
 
 
 # ---------------------------------------------------------------------------
