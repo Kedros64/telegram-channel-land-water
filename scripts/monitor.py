@@ -545,7 +545,7 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
 
 
 def filter_relevant_with_gemini(
-    articles: list[dict], model: genai.GenerativeModel
+    articles: list[dict]
 ) -> list[dict]:
     """
     Отправляет заголовки всех статей одним запросом в Gemini.
@@ -568,7 +568,7 @@ def filter_relevant_with_gemini(
     log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
 
     try:
-        response = model.generate_content(prompt)
+        response = _genai_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
         response_text = response.text
         log.info("Ответ Gemini (фильтрация): %s", response_text[:300])
     except Exception as exc:
@@ -597,7 +597,7 @@ def filter_relevant_with_gemini(
 # ---------------------------------------------------------------------------
 
 
-def generate_post(article: dict, model: genai.GenerativeModel) -> str:
+def generate_post(article: dict) -> str:
     """Генерирует готовый пост через Google Gemini API."""
     prompt = GEMINI_POST_PROMPT.format(
         title=article.get("title", "Без заголовка"),
@@ -608,7 +608,7 @@ def generate_post(article: dict, model: genai.GenerativeModel) -> str:
 
     log.info("Генерирую пост: «%s»", (article.get("title") or "")[:70])
 
-    response = model.generate_content(prompt)
+    response = _genai_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     return response.text
 
 
@@ -692,12 +692,7 @@ def main() -> None:
         sys.exit(1)
 
         _genai_client = genai.Client(api_key=GEMINI_API_KEY)
-            class _ModelWrapper:
-        def generate_content(self, prompt):
-            resp = _genai_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-            return resp
-    model = _ModelWrapper()
-    log.info("Используется модель: %s", GEMINI_MODEL)
+        log.info("Используется модель: %s", GEMINI_MODEL)
 
     # 2. Читаем источники
     sources = read_sources()
@@ -717,7 +712,7 @@ def main() -> None:
         return
 
     # 4. Фильтруем релевантные через Gemini (один запрос на все заголовки)
-    relevant = filter_relevant_with_gemini(all_articles, model)
+    relevant = filter_relevant_with_gemini(all_articles)
 
     if not relevant:
         log.info("Релевантных материалов не найдено по оценке Gemini")
@@ -731,7 +726,7 @@ def main() -> None:
 
     for article in relevant:
         try:
-            post_text = generate_post(article, model)
+            post_text = generate_post(article)
             articles_with_posts.append((article, post_text))
             time.sleep(2)  # Пауза между вызовами Gemini API
         except Exception as exc:
