@@ -165,17 +165,29 @@ Prompt (EN): [промпт для Midjourney/DALL-E, flat design или editoria
 def gemini_generate(prompt: str) -> str:
     """
     Вызывает Gemini REST API напрямую через requests.
-    Возвращает текст ответа или поднимает исключение.
+    При ошибке 429 делает до 3 повторных попыток с задержкой 5/10/20 сек.
     """
     url = GEMINI_API_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
     }
-    resp = requests.post(url, json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+    delays = [5, 10, 20]
+    for attempt in range(1, len(delays) + 2):  # попытки 1..4
+        resp = requests.post(url, json=payload, timeout=60)
+        if resp.status_code == 429 and attempt <= len(delays):
+            wait = delays[attempt - 1]
+            log.warning(
+                "Gemini API: 429 Too Many Requests (попытка %d/4), жду %d сек…",
+                attempt, wait,
+            )
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    # Последняя попытка уже выкинула исключение через raise_for_status
+    raise RuntimeError("Gemini API: исчерпаны все попытки")
 
 
 def moscow_now() -> datetime:
@@ -608,49 +620,72 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
         return []
 
 
+FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к Gemini
+
+
 def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     """
-    Отправляет заголовки всех статей одним запросом в Gemini.
-    Gemini возвращает JSON {"relevant_ids": [...]}.
+    Отправляет заголовки статей в Gemini для фильтрации.
+    Если заголовков > FILTER_BATCH_SIZE — разбивает на батчи по 80 штук,
+    обрабатывает последовательно с паузой 2 сек между батчами.
     Возвращает отфильтрованный список статей (максимум MAX_POSTS_TO_GENERATE).
     """
     if not articles:
         return []
 
-    # Формируем пронумерованный список заголовков
-    headlines_lines = []
-    for idx, article in enumerate(articles, start=1):
-        source = article.get("source_name", "")
-        title = article.get("title", "").strip()
-        headlines_lines.append(f"{idx}. [{source}] {title}")
+    # Разбиваем на батчи
+    batches = [
+        articles[i: i + FILTER_BATCH_SIZE]
+        for i in range(0, len(articles), FILTER_BATCH_SIZE)
+    ]
+    total_batches = len(batches)
+    log.info(
+        "Отправляю %d заголовков в Gemini для фильтрации (батчей: %d)…",
+        len(articles), total_batches,
+    )
 
-    headlines_list = "\n".join(headlines_lines)
-    prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
+    all_relevant: list[dict] = []
 
-    log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
+    for batch_num, batch in enumerate(batches, start=1):
+        # Нумерация внутри батча начинается с 1 — IDs локальные
+        headlines_lines = []
+        for idx, article in enumerate(batch, start=1):
+            source = article.get("source_name", "")
+            title = article.get("title", "").strip()
+            headlines_lines.append(f"{idx}. [{source}] {title}")
 
-    try:
-        response_text = gemini_generate(prompt)
-        log.debug("Ответ Gemini (фильтрация): %s", response_text[:300])
-    except Exception as exc:
-        log.error("Ошибка вызова Gemini API при фильтрации: %s", exc)
-        return []
+        headlines_list = "\n".join(headlines_lines)
+        prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
 
-    relevant_ids = _parse_relevant_ids(response_text, max_id=len(articles))
+        log.info("Батч %d/%d: %d заголовков", batch_num, total_batches, len(batch))
 
-    if not relevant_ids:
+        try:
+            response_text = gemini_generate(prompt)
+            log.debug("Ответ Gemini (батч %d): %s", batch_num, response_text[:300])
+        except Exception as exc:
+            log.error("Ошибка Gemini API при фильтрации батча %d: %s", batch_num, exc)
+            if batch_num < total_batches:
+                time.sleep(2)
+            continue
+
+        local_ids = _parse_relevant_ids(response_text, max_id=len(batch))
+        batch_relevant = [batch[i - 1] for i in local_ids]
+        all_relevant.extend(batch_relevant)
+
+        log.info(
+            "Батч %d/%d: выбрано %d релевантных | IDs: %s",
+            batch_num, total_batches, len(batch_relevant), local_ids,
+        )
+
+        if batch_num < total_batches:
+            time.sleep(2)
+
+    if not all_relevant:
         log.info("Gemini не нашёл релевантных новостей")
         return []
 
-    relevant_articles = [articles[i - 1] for i in relevant_ids]
-    log.info(
-        "Gemini выбрал %d релевантных из %d | IDs: %s",
-        len(relevant_articles),
-        len(articles),
-        relevant_ids,
-    )
-
-    return relevant_articles[:MAX_POSTS_TO_GENERATE]
+    log.info("Итого релевантных: %d из %d", len(all_relevant), len(articles))
+    return all_relevant[:MAX_POSTS_TO_GENERATE]
 
 
 # ---------------------------------------------------------------------------
