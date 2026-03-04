@@ -100,22 +100,54 @@ def markdown_to_html(text: str) -> str:
     Конвертирует базовую Markdown-разметку в HTML, поддерживаемый Telegram.
     Telegram поддерживает: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="">.
 
-    Обрабатывается слева направо, поэтому порядок замен важен.
+    Порядок: сначала извлекаем Markdown-конструкции, потом экранируем
+    обычный текст, чтобы &, <, > не сломали HTML-парсер Telegram.
     """
-    # Экранируем HTML-символы, которые НЕ являются частью наших тегов
-    # Сначала работаем с текстом как есть, затем применяем замены
+    # Шаг 1: Вытаскиваем Markdown-конструкции в плейсхолдеры,
+    # чтобы их содержимое не затронуло дальнейшее экранирование.
 
-    # [текст](url) → <a href="url">текст</a>
-    text = re.sub(r"\[([^\[\]]+?)\]\((https?://[^\)]+?)\)", r'<a href="\2">\1</a>', text)
+    links: list[tuple[str, str]] = []   # (display_text, url)
+    bolds: list[str] = []
+    italics: list[str] = []
+    codes: list[str] = []
 
-    # **текст** → <b>текст</b>
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    def save_link(m: re.Match) -> str:
+        links.append((m.group(1), m.group(2)))
+        return f"\x00LINK{len(links) - 1}\x00"
 
-    # *текст* → <i>текст</i> (только одиночные звёздочки)
-    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    def save_bold(m: re.Match) -> str:
+        bolds.append(m.group(1))
+        return f"\x00BOLD{len(bolds) - 1}\x00"
 
-    # `текст` → <code>текст</code>
-    text = re.sub(r"`([^`]+?)`", r"<code>\1</code>", text)
+    def save_italic(m: re.Match) -> str:
+        italics.append(m.group(1))
+        return f"\x00ITAL{len(italics) - 1}\x00"
+
+    def save_code(m: re.Match) -> str:
+        codes.append(m.group(1))
+        return f"\x00CODE{len(codes) - 1}\x00"
+
+    text = re.sub(r"\[([^\[\]]+?)\]\((https?://[^\)]+?)\)", save_link, text)
+    text = re.sub(r"\*\*(.+?)\*\*", save_bold, text, flags=re.DOTALL)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", save_italic, text)
+    text = re.sub(r"`([^`]+?)`", save_code, text)
+
+    # Шаг 2: Экранируем HTML-спецсимволы в оставшемся тексте
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Шаг 3: Восстанавливаем Markdown-конструкции как HTML-теги
+    for i, (display, url) in enumerate(links):
+        display = display.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00LINK{i}\x00", f'<a href="{url}">{display}</a>')
+    for i, content in enumerate(bolds):
+        content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00BOLD{i}\x00", f"<b>{content}</b>")
+    for i, content in enumerate(italics):
+        content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00ITAL{i}\x00", f"<i>{content}</i>")
+    for i, content in enumerate(codes):
+        content = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = text.replace(f"\x00CODE{i}\x00", f"<code>{content}</code>")
 
     return text
 
@@ -148,6 +180,7 @@ def send_message(text: str) -> bool:
     """
     Отправляет сообщение в Telegram-канал через Bot API.
     Сначала пробует с HTML-разметкой; при ошибке разбора — без разметки.
+    При ошибке 429 (flood control) — до 3 повторных попыток с задержкой.
     Возвращает True при успехе.
     """
     api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendMessage"
@@ -160,37 +193,54 @@ def send_message(text: str) -> bool:
         "disable_web_page_preview": False,
     }
 
+    retry_delays = [10, 30, 60]  # секунды между попытками при 429
+
     try:
-        resp = requests.post(api_url, json=payload, timeout=30)
-        data = resp.json()
+        for attempt, delay in enumerate(retry_delays + [None], start=1):
+            resp = requests.post(api_url, json=payload, timeout=30)
+            data = resp.json()
 
-        if data.get("ok"):
-            msg_id = data.get("result", {}).get("message_id", "?")
-            log.info("✓ Пост отправлен (message_id=%s)", msg_id)
-            return True
+            # Flood control — ждём и повторяем
+            if resp.status_code == 429:
+                retry_after = data.get("parameters", {}).get("retry_after", delay)
+                if delay is not None:
+                    log.warning(
+                        "Telegram 429 (попытка %d/%d), жду %d сек…",
+                        attempt, len(retry_delays) + 1, retry_after,
+                    )
+                    time.sleep(retry_after)
+                    continue
+                # Все попытки исчерпаны
+                log.error("Telegram API: исчерпаны все попытки после 429")
+                return False
 
-        error_desc = data.get("description", "Неизвестная ошибка")
-        log.error("Telegram API вернул ошибку: %s", error_desc)
-
-        # Если ошибка в HTML-разметке — повторяем без parse_mode
-        if "can't parse" in error_desc.lower() or "bad request" in error_desc.lower():
-            log.warning("Повторная попытка без HTML-разметки...")
-            payload["text"] = sanitize_for_telegram(text)
-            payload.pop("parse_mode", None)
-
-            resp2 = requests.post(api_url, json=payload, timeout=30)
-            data2 = resp2.json()
-
-            if data2.get("ok"):
-                log.info("✓ Пост отправлен без разметки")
+            if data.get("ok"):
+                msg_id = data.get("result", {}).get("message_id", "?")
+                log.info("✓ Пост отправлен (message_id=%s)", msg_id)
                 return True
 
-            log.error(
-                "Повторная попытка не удалась: %s",
-                data2.get("description", "Неизвестная ошибка"),
-            )
+            error_desc = data.get("description", "Неизвестная ошибка")
+            log.error("Telegram API вернул ошибку: %s", error_desc)
 
-        return False
+            # Если ошибка в HTML-разметке — повторяем без parse_mode
+            if "can't parse" in error_desc.lower() or "bad request" in error_desc.lower():
+                log.warning("Повторная попытка без HTML-разметки...")
+                payload["text"] = sanitize_for_telegram(text)
+                payload.pop("parse_mode", None)
+
+                resp2 = requests.post(api_url, json=payload, timeout=30)
+                data2 = resp2.json()
+
+                if data2.get("ok"):
+                    log.info("✓ Пост отправлен без разметки")
+                    return True
+
+                log.error(
+                    "Повторная попытка не удалась: %s",
+                    data2.get("description", "Неизвестная ошибка"),
+                )
+
+            return False
 
     except requests.exceptions.Timeout:
         log.error("Таймаут при отправке в Telegram (30 сек)")
@@ -300,7 +350,11 @@ def main() -> None:
 
     log.info("Файлов для публикации: %d", len(candidates))
 
-    for post_file in candidates:
+    for file_idx, post_file in enumerate(candidates):
+        if file_idx > 0:
+            log.info("Пауза %d сек перед следующим файлом...", PAUSE_BETWEEN_POSTS)
+            time.sleep(PAUSE_BETWEEN_POSTS)
+
         try:
             success = process_file(post_file)
 
