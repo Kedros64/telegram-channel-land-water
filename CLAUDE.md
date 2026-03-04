@@ -31,9 +31,10 @@
 sources.xlsx
      │
      ▼
-scripts/monitor.py          ← читает источники, парсит HTML,
-     │                         оценивает релевантность по ключевым словам,
-     │  (вызывает Gemini API)  генерирует готовые посты
+scripts/monitor.py          ← читает источники (Telegram каналы + сайты),
+     │                         парсит через t.me/s/{channel} или RSS/HTML,
+     │  (два типа вызовов     фильтрует релевантные через Gemini (батч-запрос),
+     │   Gemini API)          генерирует готовые посты (по одному запросу на статью)
      ▼
 posts/ГГГГ-ММ-ДД_ЧЧ.md    ← сохраняет результат мониторинга
      │
@@ -61,7 +62,7 @@ Telegram-канал
 telegram-channel-land-water/
 ├── CLAUDE.md                              # Этот файл — руководство AI-ассистента
 ├── sources.xlsx                           # Список источников для мониторинга
-├── requirements.txt                       # Зависимости Python
+├── requirements.txt                       # Зависимости Python (5 пакетов)
 ├── .env.example                           # Пример переменных окружения
 ├── .gitignore                             # Исключения git
 ├── posts/                                 # Результаты мониторинга и посты
@@ -81,29 +82,80 @@ telegram-channel-land-water/
 
 ---
 
+## Зависимости (requirements.txt)
+
+Только 5 пакетов — без тяжёлых SDK:
+
+| Пакет            | Версия  | Назначение                                      |
+|------------------|---------|-------------------------------------------------|
+| `openpyxl`       | ≥3.1.0  | Чтение sources.xlsx                             |
+| `requests`       | ≥2.31.0 | HTTP-запросы к сайтам, Gemini API, Telegram API |
+| `beautifulsoup4` | ≥4.12.0 | HTML-парсинг новостных страниц                  |
+| `python-dotenv`  | ≥1.0.0  | Загрузка переменных из .env                     |
+| `lxml`           | ≥5.0.0  | Быстрый HTML-парсер для BeautifulSoup           |
+
+**Намеренно не используются:**
+- `feedparser` — заменён на stdlib `xml.etree.ElementTree` для RSS/Atom парсинга
+- `google-generativeai` SDK — заменён на прямые REST-вызовы через `requests`
+
+Не добавляй эти пакеты обратно без явного обоснования.
+
+---
+
 ## Описание скриптов
 
 ### scripts/monitor.py
 
-**Задача:** Мониторинг источников и генерация постов.
+**Задача:** Мониторинг источников и генерация постов через двухшаговый пайплайн Gemini.
 
 **Алгоритм:**
 1. Читает `sources.xlsx`, фильтрует строки с `active = да`
-2. Для каждого источника типа `site` — HTTP GET + BeautifulSoup парсинг HTML
-3. Пробует несколько CSS-селекторов для поиска новостных блоков (адаптация к разным сайтам)
-4. Оценивает релевантность каждой публикации по ключевым словам (см. ниже)
-5. Выбирает топ-3 наиболее релевантных материала (сортировка по количеству совпадений)
-6. Для каждого генерирует пост через Google Gemini API (`gemini-2.0-flash`)
+2. Для каждого источника типа `telegram` — парсит публичный веб-вид `https://t.me/s/{channel}`
+3. Для каждого источника типа `site` — сначала пробует RSS (несколько стандартных путей), затем HTML-парсинг как fallback
+4. Собирает все статьи со всех источников **без** предварительной фильтрации по ключевым словам
+5. Отправляет все заголовки **одним** батч-запросом в Gemini → получает JSON `{"relevant_ids": [...]}`
+6. Для каждой релевантной статьи (максимум `MAX_POSTS_TO_GENERATE=3`) генерирует пост через Gemini (один запрос, пауза 2 сек между вызовами)
 7. Сохраняет результат в `posts/ГГГГ-ММ-ДД_ЧЧ.md`
 8. Обновляет `posts/last_check.txt`
+
+**Ключевые константы:**
+```python
+MAX_ARTICLES_PER_SOURCE = 10  # Сколько статей/сообщений брать с каждого источника
+MAX_POSTS_TO_GENERATE = 3     # Максимум постов за один запуск
+GEMINI_MODEL = "gemini-2.0-flash"
+```
 
 **Переменные окружения:**
 - `GEMINI_API_KEY` — ключ Google Gemini API
 
 **Особенности:**
+- SSL-проверка отключена (`verify=False`) — госсайты часто используют самоподписанные/устаревшие сертификаты; `urllib3` warnings отключены глобально
+- Пауза 1 сек между HTTP-запросами к сайтам (вежливый краулер)
+- Пауза 2 сек между вызовами Gemini API при генерации постов
+- User-Agent имитирует Chrome — снижает риск блокировки
 - Если источник недоступен — логирует предупреждение и продолжает с остальными
-- Пауза 1 сек между запросами к сайтам (вежливый краулер)
-- User-Agent имитирует браузер Chrome — снижает риск блокировки
+
+**Парсинг Telegram-каналов (`fetch_telegram_channel`):**
+- URL: `https://t.me/s/{channel}` — публичный веб-вид, без MTProto/API-ключей
+- Имя канала извлекается из `t.me/channelname` или `@channelname`
+- Селектор сообщений: `.tgme_widget_message_wrap` → `.tgme_widget_message_text`
+- Берутся последние `MAX_ARTICLES_PER_SOURCE` сообщений (в reversed порядке — сначала свежие)
+- Приватные/несуществующие каналы возвращают HTTP 404 → логируется предупреждение, выполнение продолжается
+
+**Парсинг сайтов — RSS-first стратегия (`fetch_site_articles`):**
+- `_try_rss()`: проверяет базовый URL + 9 стандартных путей: `/rss`, `/rss.xml`, `/feed`, `/feed.xml`, `/atom.xml`, `/news/rss`, `/news/feed`, `/export/rss`, `/lenta/rss`
+- RSS-парсинг через stdlib `xml.etree.ElementTree` — поддерживает RSS 2.0 и Atom
+- `_try_html()` (fallback): 20 CSS-селекторов (`article`, `.news-item`, `.card`, и др.), затем заголовки `h2/h3/h4` со ссылками
+- HTML-парсинг: удаляет `script`, `style`, `nav`, `footer`, `header`, `aside`, `noscript` перед обходом
+
+**Двухшаговый пайплайн Gemini:**
+1. `filter_relevant_with_gemini()` — отправляет пронумерованные заголовки батчем, получает JSON `{"relevant_ids": [...]}`, парсит через `_parse_relevant_ids()` (устойчив к markdown-обёртке и частично сломанным ответам)
+2. `generate_post()` — по одному запросу на статью, использует `GEMINI_POST_PROMPT`
+
+**Gemini REST API (`gemini_generate`):**
+- URL: `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}`
+- Параметры: `temperature=0.7`, `maxOutputTokens=2048`
+- Прямой вызов через `requests.post` без SDK
 
 ---
 
@@ -113,13 +165,23 @@ telegram-channel-land-water/
 
 **Алгоритм:**
 1. Сканирует `posts/*.md` — берёт файлы без суффикса `_posted` и не в `posted.log`
-2. Извлекает блоки `**ГОТОВЫЙ ПОСТ:**` регуляркой
-3. Конвертирует Markdown-разметку в HTML (Telegram parse_mode=HTML)
+2. Извлекает блоки `**ГОТОВЫЙ ПОСТ:**` регуляркой (граница — `**ВАРИАНТЫ CTA**`, `---` или `## Пост`)
+3. Конвертирует Markdown-разметку в HTML (Telegram `parse_mode=HTML`)
 4. Отправляет каждый пост через `sendMessage` (Telegram Bot API)
-5. При ошибке разбора HTML — повторяет без разметки
-6. Между постами из одного файла — пауза 30 секунд
+5. При ошибке разбора HTML — повторяет без `parse_mode` (plain text)
+6. Между постами из одного файла — пауза 30 секунд (`PAUSE_BETWEEN_POSTS`)
 7. При успехе: переименовывает файл (`_posted.md`) и записывает в `posted.log`
 8. При ошибке: записывает в `errors.log`, продолжает со следующим файлом
+
+**Поддерживаемая Markdown → HTML конвертация (`markdown_to_html`):**
+- `[текст](url)` → `<a href="url">текст</a>`
+- `**текст**` → `<b>текст</b>`
+- `*текст*` → `<i>текст</i>` (одиночные звёздочки)
+- `` `текст` `` → `<code>текст</code>`
+
+**Ограничения:**
+- Максимум 4096 символов (лимит Telegram); длинные посты обрезаются с `...` (`sanitize_for_telegram`)
+- Управляющие символы `[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]` удаляются
 
 **Переменные окружения:**
 - `BOT_TOKEN` — токен Telegram-бота
@@ -131,14 +193,16 @@ telegram-channel-land-water/
 
 Хранится в корне репозитория. Лист: **Sources**.
 
-| Столбец  | Описание                              |
-|----------|---------------------------------------|
-| `name`   | Название источника (для отображения)  |
-| `url`    | Прямая ссылка                         |
-| `type`   | `telegram` или `site`                 |
-| `active` | `да` / `нет`                          |
+| Столбец  | Описание                                    |
+|----------|---------------------------------------------|
+| `name`   | Название источника (для логов и постов)     |
+| `url`    | Ссылка: `https://site.ru/news` или `t.me/channel` |
+| `type`   | `telegram` или `site`                       |
+| `active` | `да` / `нет` (также: `yes`, `1`, `true`)    |
 
-Строки с `active = нет` пропускаются при мониторинге без ошибок.
+**Текущий масштаб:** ~51 активный источник (38 Telegram-каналов + 13 сайтов) — по состоянию на 2026-03-04.
+
+Строки с `active ≠ да/yes/1/true` пропускаются без ошибок.
 
 ---
 
@@ -183,19 +247,25 @@ Prompt (EN): [промпт для генерации изображения]
 [ГГГГ-ММ-ДД][ЧЧ:ММ] — релевантных материалов не найдено. Проверено источников: N
 ```
 
+**КРИТИЧНО:** Формат `**ГОТОВЫЙ ПОСТ:**` — жёсткий якорь для регулярки в `poster.py:extract_posts()`. Изменение формата требует синхронного обновления паттерна в этой функции.
+
 ---
 
-## Критерии релевантности
+## GitHub Actions Workflow (monitor_and_post.yml)
 
-### Включающие ключевые слова
+Workflow состоит из **4 последовательных шагов** в одном job:
 
-земельный, водный, водопользование, Росводресурсы, Росреестр, гидротехнич, пруд, водоём, аренда земли, земельный участок, лесфонд, кадастр, самовольное занятие, штраф, предписание, судебная практика, нарушение водного, нарушение земельного, межевание, сервитут, водоохранная зона, береговая полоса, гидротехническое сооружение, декларация безопасности, Росприроднадзор, Роснедра, Минприроды, земельный кодекс, водный кодекс
+| Шаг | Действие |
+|-----|----------|
+| `Checkout repository` | `actions/checkout@v4`, `fetch-depth: 0` |
+| `Setup Python` | `actions/setup-python@v5`, Python 3.11, pip cache |
+| `Install dependencies` | `pip install -r requirements.txt` |
+| `Run monitor` | `python scripts/monitor.py` (переменная `GEMINI_API_KEY`) |
+| `Commit generated posts` | `git add posts/` + коммит `Auto: posts ...` если есть изменения |
+| `Post to Telegram channel` | `python scripts/poster.py` (переменные `BOT_TOKEN`, `CHANNEL_ID`) |
+| `Commit post results` | `git pull --rebase --autostash` + `git add posts/` + коммит `Auto: mark posted ...` |
 
-### Жёсткие стоп-слова
-
-убийство, теракт, наркотики
-
-Материал считается **нерелевантным** только если содержит стоп-слово **И** не содержит ни одного включающего слова.
+**Необходимые права:** `permissions: contents: write` (для push из Actions).
 
 ---
 
@@ -219,7 +289,6 @@ Prompt (EN): [промпт для генерации изображения]
 2. Отправь команду `/newbot`
 3. Придумай имя бота (например: `Land Water News Bot`) и username (например: `landwaterbot`)
 4. BotFather пришлёт `BOT_TOKEN` в формате `1234567890:ABCdef...`
-5. Сохрани токен — он понадобится на шаге 4
 
 ### Шаг 2: Добавить бота администратором канала
 
@@ -227,7 +296,6 @@ Prompt (EN): [промпт для генерации изображения]
 2. Перейди в **Администраторы → Добавить администратора**
 3. Найди своего бота по username
 4. Включи право **«Публикация сообщений»** (остальные можно отключить)
-5. Сохрани изменения
 
 ### Шаг 3: Узнать CHANNEL_ID
 
@@ -283,44 +351,32 @@ python scripts/poster.py
 
 ## Расширение источников
 
-Чтобы добавить новый сайт для мониторинга:
+### Добавить сайт
 
 1. Открой `sources.xlsx` (Excel / LibreOffice Calc)
-2. Добавь строку в лист **Sources**:
-   - `name` — понятное название (например: `Судебные акты ВС РФ`)
-   - `url` — прямая ссылка на страницу со списком новостей/публикаций
-   - `type` — `site`
-   - `active` — `да`
-3. Сохрани и закоммить: `git add sources.xlsx && git commit -m "Add new source: ..."`
+2. Добавь строку в лист **Sources**: `type = site`, `active = да`
+3. В `url` — ссылка на **страницу-список** новостей, не главную. Например: `https://rosreestr.gov.ru/press/archive/`
+4. Если у сайта есть RSS — можно указать прямую ссылку на RSS-фид; `monitor.py` определит его автоматически
+5. `git add sources.xlsx && git commit -m "Add source: ..."`
 
-**Совет:** Указывай ссылку на страницу с **архивом/списком** новостей, а не на главную страницу сайта. Например: `https://rosreestr.gov.ru/press/archive/` вместо `https://rosreestr.gov.ru/`.
+### Добавить Telegram-канал
+
+1. Добавь строку в `sources.xlsx`: `type = telegram`, `active = да`
+2. В `url` — `https://t.me/channelname` или `@channelname`
+3. Канал должен быть **публичным** — приватные возвращают 404 и пропускаются с предупреждением
+4. `git add sources.xlsx && git commit -m "Add Telegram source: ..."`
 
 ---
 
 ## Мониторинг Telegram-каналов
 
-Прямой парсинг Telegram-каналов требует авторизации через **MTProto API** — это сложнее, чем парсинг сайтов.
+Реализовано через `https://t.me/s/{channel}` — **без MTProto и API-ключей**, работает для всех публичных каналов.
 
-### Почему нельзя просто так?
-
-Telegram не предоставляет публичного RSS или Bot API для **чтения** чужих каналов. Bot API позволяет только **отправлять** сообщения в каналы, где бот является администратором.
-
-### Как подключить через Telethon (пошагово)
-
-1. **Зарегистрируйся на [my.telegram.org](https://my.telegram.org)** — нужен номер телефона
-2. **Создай приложение** → получи `API_ID` (число) и `API_HASH` (строка)
-3. **Установи Telethon:** добавь `telethon>=1.36.0` в `requirements.txt`
-4. **Добавь переменные в `.env` и GitHub Secrets:**
-   ```
-   TELEGRAM_API_ID=12345678
-   TELEGRAM_API_HASH=abc123def456...
-   TELEGRAM_SESSION=base64_encoded_session_string
-   ```
-   Сессию можно получить запустив Telethon локально и авторизовавшись.
-5. **Замени заглушку** `fetch_telegram_channel()` в `scripts/monitor.py` на реализацию через `TelegramClient`
-6. **Активируй источники** в `sources.xlsx`: измени `active = нет` → `да` для Telegram-источников
-
-В текущей версии `fetch_telegram_channel()` содержит подробную инструкцию в виде docstring.
+Если потребуется мониторинг **приватных** каналов — нужен Telethon (MTProto API):
+1. Зарегистрируйся на [my.telegram.org](https://my.telegram.org), получи `API_ID` и `API_HASH`
+2. Добавь `telethon>=1.36.0` в `requirements.txt`
+3. Добавь `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION` в `.env` и GitHub Secrets
+4. Перепиши `fetch_telegram_channel()` в `monitor.py` с использованием `TelegramClient`
 
 ---
 
@@ -334,24 +390,28 @@ Telegram не предоставляет публичного RSS или Bot API
 
 ### Коммиты
 
+Тема — до 72 символов, императивный стиль:
+
 ```
-Add keyword-based relevance scoring
-Fix poster.py HTML escaping for Telegram
-Update sources.xlsx with new legal portals
-Add Telethon support for Telegram monitoring
+Add Gemini-based relevance filtering
+Fix RSS parsing for Atom feeds
+Update sources.xlsx: add 5 new Telegram channels
+Replace feedparser with stdlib xml.etree.ElementTree
 ```
 
-Тема коммита — до 72 символов, императивный стиль.
+Автоматические коммиты workflow имеют формат:
+- `Auto: posts ГГГГ-ММ-ДД ЧЧ:ММ UTC`
+- `Auto: mark posted ГГГГ-ММ-ДД ЧЧ:ММ UTC`
 
 ---
 
 ## Переменные окружения
 
-| Переменная      | Где используется | Описание                                     |
-|-----------------|------------------|----------------------------------------------|
-| `GEMINI_API_KEY`| `monitor.py`     | Ключ Google Gemini API для генерации постов  |
-| `BOT_TOKEN`     | `poster.py`      | Токен Telegram-бота от @BotFather            |
-| `CHANNEL_ID`    | `poster.py`      | ID или @username Telegram-канала             |
+| Переменная       | Где используется | Описание                                    |
+|------------------|------------------|---------------------------------------------|
+| `GEMINI_API_KEY` | `monitor.py`     | Ключ Google Gemini API для фильтрации и генерации постов |
+| `BOT_TOKEN`      | `poster.py`      | Токен Telegram-бота от @BotFather           |
+| `CHANNEL_ID`     | `poster.py`      | ID или @username Telegram-канала            |
 
 Все переменные хранятся:
 - **Локально:** в файле `.env` (в `.gitignore`, не коммитится)
@@ -359,15 +419,19 @@ Add Telethon support for Telegram monitoring
 
 ---
 
-## Ключевые решения
+## Ключевые архитектурные решения
 
 | Решение | Обоснование |
 |---|---|
-| Google Gemini API для генерации постов | Быстрая и бесплатная генерация текста; модель `gemini-2.0-flash` |
-| Keyword-scoring для релевантности | Быстро и без доп. API-вызовов фильтрует нерелевантные материалы |
+| Gemini-based relevance filtering (батч) | Один API-вызов на все заголовки — точнее ключевых слов, не требует поддержки словарей |
+| Прямые REST-вызовы к Gemini (без SDK) | Убирает зависимость `google-generativeai`; проще отлаживать и контролировать |
+| stdlib XML вместо feedparser | Одна зависимость меньше; feedparser избыточен для RSS 2.0 и Atom |
+| RSS-first + HTML fallback | RSS структурированнее и стабильнее; HTML — универсальный fallback |
+| t.me/s/{channel} для Telegram | Без MTProto и API-ключей; работает для всех публичных каналов |
 | HTML parse_mode в Telegram | Надёжнее MarkdownV2 — меньше проблем с экранированием спецсимволов |
+| SSL `verify=False` + urllib3 warnings off | Госсайты часто используют устаревшие/самоподписанные сертификаты |
 | Переименование в `_posted.md` | Состояние публикации видно в git-истории; не зависит от внешних файлов |
-| Пауза 30 сек между постами | Предотвращает флуд-фильтр Telegram и не раздражает подписчиков |
+| Пауза 30 сек между постами | Предотвращает флуд-фильтр Telegram |
 | `last_check.txt` в git | Состояние проверки сохраняется между запусками workflow |
 
 ---
@@ -377,10 +441,11 @@ Add Telethon support for Telegram monitoring
 - Не коммить `.env` — только `.env.example`
 - Не хардкодить токены и ключи в коде
 - Не пушить напрямую в `main`
-- Не удалять `posts/last_check.txt` — это сломает отслеживание новых публикаций
-- Не менять формат блока `**ГОТОВЫЙ ПОСТ:**` без обновления регулярки в `poster.py`
-- Не коммить `sources.xlsx` с реальными credentials или личными данными
+- Не удалять `posts/last_check.txt` — сломает отслеживание новых публикаций
+- Не менять формат `**ГОТОВЫЙ ПОСТ:**` без обновления регулярки в `poster.py:extract_posts()`
+- Не коммить `sources.xlsx` с личными данными или credentials
+- Не добавлять `feedparser` или `google-generativeai` обратно — они намеренно заменены stdlib и REST-вызовами
 
 ---
 
-*Последнее обновление: 2026-03-01 — Переключение с Anthropic на Google Gemini API*
+*Последнее обновление: 2026-03-04 — Актуализация: Gemini-фильтрация (батч), RSS-first стратегия, t.me/s парсинг Telegram, 51 источник, stdlib XML, прямые REST-вызовы к Gemini API*
