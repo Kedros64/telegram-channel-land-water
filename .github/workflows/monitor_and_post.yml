@@ -71,3 +71,39 @@ jobs:
             git commit -m "Auto: mark posted $(date +'%Y-%m-%d %H:%M UTC')"
             git push
           fi
+
+      - name: Notify owner via Telegram
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import os, glob, re, requests
+
+          bot_token = os.environ["BOT_TOKEN"]
+          owner_id = 8118456427
+
+          md_files = [f for f in glob.glob("posts/*.md") + glob.glob("posts/*_posted.md")
+                      if ".gitkeep" not in f]
+
+          if not md_files:
+              text = "⚠️ Мониторинг завершён — файл результата не найден."
+          else:
+              latest = max(md_files, key=os.path.getmtime)
+              content = open(latest, encoding="utf-8").read()
+              count_m = re.search(r"Найдено релевантных материалов: (\d+)", content)
+              src_m   = re.search(r"Проверено источников: (\d+)", content)
+              count   = count_m.group(1) if count_m else "?"
+              sources = src_m.group(1)   if src_m   else "?"
+              if count == "0":
+                  text = f"📭 Новых материалов нет. Проверено источников: {sources}."
+              else:
+                  text = f"✅ Опубликовано постов: {count}. Источников: {sources}."
+
+          requests.post(
+              f"https://api.telegram.org/bot{bot_token}/sendMessage",
+              json={"chat_id": owner_id, "text": text},
+              timeout=10,
+          )
+          print(f"Уведомление отправлено: {text}")
+          EOF
