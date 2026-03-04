@@ -11,7 +11,7 @@ trigger_bot.py — Telegram-бот для ручного запуска мони
 Переменные окружения (добавь в .env):
     BOT_TOKEN      — токен Telegram-бота (уже настроен)
     OWNER_CHAT_ID  — числовой Telegram ID владельца (узнай через @userinfobot)
-    GITHUB_TOKEN   — GitHub Personal Access Token (нужны права: workflow)
+    GH_PAT         — GitHub Personal Access Token (нужны права: workflow)
     GITHUB_REPO    — репозиторий (по умолчанию: Kedros64/telegram-channel-land-water)
     GITHUB_BRANCH  — ветка для запуска (по умолчанию: master)
 """
@@ -29,7 +29,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_CHAT_ID = str(os.getenv("OWNER_CHAT_ID", ""))
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_TOKEN = os.getenv("GH_PAT", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Kedros64/telegram-channel-land-water")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "master")
 WORKFLOW_FILE = "monitor_and_post.yml"
@@ -93,7 +93,7 @@ def trigger_workflow(chat_id: int | str) -> None:
     if not GITHUB_TOKEN:
         send(
             chat_id,
-            "❌ <b>GITHUB_TOKEN не настроен.</b>\n"
+            "❌ <b>GH_PAT не настроен.</b>\n"
             "Добавьте Personal Access Token в .env (нужны права: workflow).",
         )
         return
@@ -122,7 +122,7 @@ def trigger_workflow(chat_id: int | str) -> None:
         )
         log.info("Workflow dispatched успешно (repo=%s, branch=%s)", GITHUB_REPO, GITHUB_BRANCH)
     elif resp.status_code == 401:
-        send(chat_id, "❌ GITHUB_TOKEN недействителен или недостаточно прав (нужен scope: workflow).")
+        send(chat_id, "❌ GH_PAT недействителен или недостаточно прав (нужен scope: workflow).")
         log.error("GitHub 401: %s", resp.text[:200])
     elif resp.status_code == 404:
         send(chat_id, f"❌ Репозиторий или workflow не найдены: {GITHUB_REPO}/{WORKFLOW_FILE}")

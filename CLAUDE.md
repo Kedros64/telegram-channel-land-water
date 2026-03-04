@@ -364,12 +364,12 @@ python scripts/poster.py
 2. **Fine-grained tokens** → Generate new token:
    - Repository access: только `Kedros64/telegram-channel-land-water`
    - Permissions → Actions: **Read and write**
-3. Скопируй токен, добавь в `.env`: `GITHUB_TOKEN=github_pat_...`
+3. Скопируй токен, добавь в `.env`: `GH_PAT=github_pat_...`
 
 **3. Запусти бота**
 
 ```bash
-# Убедись, что .env заполнен (BOT_TOKEN, OWNER_CHAT_ID, GITHUB_TOKEN)
+# Убедись, что .env заполнен (BOT_TOKEN, OWNER_CHAT_ID, GH_PAT)
 python scripts/trigger_bot.py
 ```
 
@@ -388,7 +388,7 @@ python scripts/trigger_bot.py
 |------------|-------------|----------|
 | `BOT_TOKEN` | да | Токен бота (уже есть) |
 | `OWNER_CHAT_ID` | да | Числовой Telegram ID владельца |
-| `GITHUB_TOKEN` | да | PAT с правами на Actions |
+| `GH_PAT` | да | PAT с правами на Actions |
 | `GITHUB_REPO` | нет | Репозиторий (по умолчанию: `Kedros64/telegram-channel-land-water`) |
 | `GITHUB_BRANCH` | нет | Ветка (по умолчанию: `master`) |
 
@@ -474,7 +474,7 @@ Fix HTML selector threshold for gov sites
 | `BOT_TOKEN`      | `poster.py`, `trigger_bot.py` | Токен Telegram-бота от @BotFather          |
 | `CHANNEL_ID`     | `poster.py`        | ID или @username Telegram-канала                        |
 | `OWNER_CHAT_ID`  | `trigger_bot.py`   | Числовой Telegram ID владельца (для ручного запуска)   |
-| `GITHUB_TOKEN`   | `trigger_bot.py`   | PAT с правами Actions для запуска workflow              |
+| `GH_PAT`   | `trigger_bot.py`   | PAT с правами Actions для запуска workflow              |
 | `GITHUB_REPO`    | `trigger_bot.py`   | Репозиторий (по умолчанию: `Kedros64/telegram-channel-land-water`) |
 | `GITHUB_BRANCH`  | `trigger_bot.py`   | Ветка для dispatch (по умолчанию: `master`)             |
 
