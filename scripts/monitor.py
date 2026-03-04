@@ -697,7 +697,7 @@ def main() -> None:
 
     # 2. Читаем источники
         sources = load_sources()
-if not sources:
+        if not sources:
         log.warning("Нет активных источников в sources.xlsx — выходим")
         save_last_check(now_utc)
         return
