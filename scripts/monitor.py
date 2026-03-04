@@ -693,14 +693,14 @@ def main() -> None:
         sys.exit(1)
 
     
-        log.info("Используется модель: %s", GEMINI_MODEL)
+    log.info("Используется модель: %s", GEMINI_MODEL)
 
     # 2. Читаем источники
-        sources = read_sources()
-        if not sources:
-            log.warning("Нет активных источников в sources.xlsx — выходим")
-            save_last_check(now_utc)
-            return
+    sources = read_sources()
+    if not sources:
+        log.warning("Нет активных источников в sources.xlsx — выходим")
+        save_last_check(now_utc)
+        return
 
     # 3. Собираем все статьи без фильтрации по ключевым словам
     all_articles = collect_all_articles(sources)
