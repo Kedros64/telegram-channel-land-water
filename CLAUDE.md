@@ -55,6 +55,16 @@ Telegram Bot API → Telegram-канал
 - 14:00 МСК (11:00 UTC) — `cron: '0 11 * * *'`
 - 19:00 МСК (16:00 UTC) — `cron: '0 16 * * *'`
 
+Шаги GitHub Actions (`monitor_and_post.yml`):
+1. Checkout (fetch-depth: 0, полная история)
+2. Setup Python 3.11
+3. Install dependencies (`pip install -r requirements.txt`)
+4. **Run monitor** — сбор источников, генерация постов
+5. **Commit generated posts** — git add/commit/push нового `.md` файла
+6. **Post to Telegram** — публикация через `poster.py`
+7. **Commit post results** — git add/commit/push переименованного `_posted.md`
+8. **Notify owner via Telegram** — уведомление владельцу (`if: always()`); owner_id захардкожен в `monitor_and_post.yml:84`
+
 ---
 
 ## Структура репозитория
@@ -94,7 +104,7 @@ telegram-channel-land-water/
 1. Читает `sources.xlsx`, фильтрует строки с `active` ∈ {да, yes, 1, true}
 2. Для каждого источника:
    - **`type = telegram`** — скрапит публичный веб-вид канала через `https://t.me/s/{channel}` (BeautifulSoup, без MTProto)
-   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 20 CSS-селекторами
+   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 35 CSS-селекторами
 3. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
 4. **Keyword pre-filter** (`pre_filter_by_keywords`): отсекает статьи без ключевых слов и со стоп-словами
 5. **Gemini API filter** (`filter_relevant_with_gemini`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
@@ -106,7 +116,7 @@ telegram-channel-land-water/
 **Ключевые константы:**
 | Константа | Значение | Назначение |
 |---|---|---|
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Модель Gemini API |
+| `GEMINI_MODEL` | `gemini-1.5-flash` | Модель Gemini API |
 | `MAX_ARTICLES_PER_SOURCE` | 10 | Статей с каждого источника |
 | `MAX_POSTS_TO_GENERATE` | 3 | Постов за один запуск |
 | `FILTER_BATCH_SIZE` | 80 | Заголовков в одном запросе к Gemini |
@@ -122,10 +132,13 @@ telegram-channel-land-water/
 **RSS-детекция:**
 Пробуемые пути (к домену источника): `/rss`, `/rss.xml`, `/feed`, `/feed.xml`, `/atom.xml`, `/news/rss`, `/news/feed`, `/export/rss`, `/lenta/rss`. Поддерживает RSS 2.0 и Atom.
 
-**CSS-селекторы для HTML-парсинга:**
-`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`
+**CSS-селекторы для HTML-парсинга (35 штук):**
 
-Если ни один селектор не даёт ≥ 3 блоков — fallback на `h2/h3/h4` с дочерними ссылками.
+Базовые: `article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`
+
+Характерные для российских государственных и правовых сайтов: `.news-feed__item`, `.page-news__item`, `.list-news-item`, `.document-item`, `.event-card`, `.news-block__item`, `.press-item`, `.content-item`, `.col-news`, `.feed-item`, `.law-item`, `div.row-item`, `tr.news-row`, `td.news-title`
+
+Если ни один селектор не даёт ≥ 2 блоков — fallback на `h2/h3/h4` с дочерними ссылками.
 
 ---
 
@@ -311,8 +324,10 @@ Fallback на keyword-filter если Gemini упал на всех батчах
 2. Нажми **Run workflow → Run workflow**
 3. Наблюдай за логами — должны пройти шаги:
    - `Run monitor` — появится файл `posts/ГГГГ-ММ-ДД_ЧЧ.md`
+   - `Commit generated posts` — файл коммитится в git
    - `Post to Telegram` — посты появятся в канале
    - `Commit post results` — в репозитории файл переименуется в `_posted.md`
+   - `Notify owner via Telegram` — владелец получает уведомление о результате (используется hardcoded ID из `monitor_and_post.yml`)
 
 ### Шаг 7: Локальное тестирование
 
@@ -442,6 +457,23 @@ python scripts/trigger_bot.py
 | Keyword-filter отсекает всё | Добавить ключевые слова в `RELEVANCE_KEYWORDS` в `monitor.py` |
 | Источник заблокировал бота | Сменить URL на зеркало или убрать источник из sources.xlsx |
 | Gemini игнорирует статьи | Скорректировать `GEMINI_FILTER_PROMPT` или расширить список тем |
+| Gemini API 403/401 ошибка | Проверить `GEMINI_API_KEY` в GitHub Secrets; убедиться что ключ валиден и модель `gemini-1.5-flash` доступна |
+| Российские госсайты блокируют GitHub Actions IP | Большинство госсайтов (rosreestr.gov.ru и т.п.) блокируют иностранные IP; нужны Telegram-каналы или сайты без геоблокировки как основные источники |
+
+### Симптом: всегда «0 материалов», но «Проверено источников: 51»
+
+Это означает что одна из трёх стадий не проходит. Порядок диагностики:
+
+1. **Смотри GitHub Actions логи → Run monitor**
+2. Найди строку: `Всего собрано статей со всех источников: N`
+   - Если `N = 0` — проблема в **сборе статей** (IP-блокировки, структура сайтов изменилась)
+3. Найди строку: `Пре-фильтрация по ключевым словам: N -> M`
+   - Если `M = 0` при `N > 0` — статьи есть, но не содержат слов из `RELEVANCE_KEYWORDS`
+4. Найди строку: `Батч 1/1: выбрано M релевантных` или `Ошибка Gemini API`
+   - Если ошибка Gemini — включается keyword-fallback; если и он даёт 0, проблема в п.3
+   - Если Gemini отвечает, но `M = 0` — Gemini считает нерелевантным; скорректировать промпт
+
+**Важно:** IP-адреса GitHub Actions (US/EU) блокируются большинством российских государственных сайтов. Основными рабочими источниками являются Telegram-каналы (через `t.me/s/`) и международные агрегаторы.
 
 ---
 
@@ -488,7 +520,7 @@ Fix HTML selector threshold for gov sites
 
 | Решение | Обоснование |
 |---|---|
-| Google Gemini API (`gemini-2.0-flash`) | Быстрая и бесплатная генерация; достаточно для текущей нагрузки |
+| Google Gemini API (`gemini-1.5-flash`) | Быстрая и бесплатная генерация; достаточно для текущей нагрузки |
 | Двухступенчатая фильтрация (keywords → Gemini) | Keyword-пре-фильтр сокращает батч для Gemini; Gemini добавляет семантику |
 | RSS → HTML fallback | RSS надёжнее и структурированнее; HTML как запасной вариант |
 | t.me/s/ для Telegram-каналов | Публичные каналы доступны без MTProto; просто и без доп. зависимостей |
@@ -511,4 +543,4 @@ Fix HTML selector threshold for gov sites
 
 ---
 
-*Последнее обновление: 2026-03-04 — Обновление документации по текущему состоянию кода*
+*Последнее обновление: 2026-03-04 — Синхронизация с кодом: gemini-1.5-flash, 35 CSS-селекторов, шаги workflow, диагностика IP-блокировок*
