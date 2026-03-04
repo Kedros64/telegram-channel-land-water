@@ -20,10 +20,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import feedparser
 import urllib3
+import xml.etree.ElementTree as ET
 
-import google.generativeai as genai
 import openpyxl
 import requests
 from bs4 import BeautifulSoup
@@ -46,6 +45,10 @@ LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_API_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "{model}:generateContent?key={key}"
+)
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
@@ -157,6 +160,22 @@ Prompt (EN): [промпт для Midjourney/DALL-E, flat design или editoria
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
+
+
+def gemini_generate(prompt: str) -> str:
+    """
+    Вызывает Gemini REST API напрямую через requests.
+    Возвращает текст ответа или поднимает исключение.
+    """
+    url = GEMINI_API_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
+    }
+    resp = requests.post(url, json=payload, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def moscow_now() -> datetime:
@@ -329,6 +348,55 @@ def fetch_telegram_channel(source: dict, session: requests.Session) -> list[dict
     return articles
 
 
+def _parse_feed_entries(text: str) -> list[dict]:
+    """
+    Простой парсер RSS 2.0 и Atom через stdlib xml.
+    Возвращает список {'title', 'link', 'summary'}.
+    """
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return []
+
+    tag = root.tag
+    entries = []
+
+    # RSS 2.0: <rss><channel><item>...
+    items = root.findall(".//item")
+    if items:
+        for item in items:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            summary = (item.findtext("description") or "").strip()
+            entries.append({"title": title, "link": link, "summary": summary})
+        return entries
+
+    # Atom: <feed xmlns="http://www.w3.org/2005/Atom">
+    atom_ns = "http://www.w3.org/2005/Atom"
+    ns_tag = f"{{{atom_ns}}}"
+    atom_entries = root.findall(f"{ns_tag}entry")
+    if not atom_entries and "feed" in tag.lower():
+        atom_entries = root.findall("entry")
+        ns_tag = ""
+
+    for entry in atom_entries:
+        title_el = entry.find(f"{ns_tag}title")
+        title = (title_el.text or "").strip() if title_el is not None else ""
+
+        link_el = entry.find(f"{ns_tag}link")
+        if link_el is not None:
+            link = link_el.get("href") or link_el.text or ""
+        else:
+            link = ""
+
+        summary_el = entry.find(f"{ns_tag}summary") or entry.find(f"{ns_tag}content")
+        summary = (summary_el.text or "").strip() if summary_el is not None else ""
+
+        entries.append({"title": title, "link": link, "summary": summary})
+
+    return entries
+
+
 def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
     """
     Пробует найти и распарсить RSS/Atom-фид сайта.
@@ -359,22 +427,18 @@ def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
             if not is_feed:
                 continue
 
-            feed = feedparser.parse(text)
-            if not feed.entries:
+            feed_entries = _parse_feed_entries(text)
+            if not feed_entries:
                 continue
 
             articles = []
-            for entry in feed.entries[:MAX_ARTICLES_PER_SOURCE]:
+            for entry in feed_entries[:MAX_ARTICLES_PER_SOURCE]:
                 title = (entry.get("title") or "").strip()
                 if not title or len(title) < 10:
                     continue
 
                 # summary может содержать HTML — чистим
-                raw_summary = (
-                    entry.get("summary")
-                    or entry.get("description")
-                    or entry.get("content", [{}])[0].get("value", "")
-                )
+                raw_summary = entry.get("summary") or entry.get("description") or ""
                 summary_text = BeautifulSoup(raw_summary, "lxml").get_text(
                     separator=" ", strip=True
                 )[:600]
@@ -383,7 +447,7 @@ def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
                     {
                         "title": title,
                         "content": summary_text,
-                        "url": entry.get("link", base_url),
+                        "url": entry.get("link") or base_url,
                         "source_name": name,
                     }
                 )
@@ -544,9 +608,7 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
         return []
 
 
-def filter_relevant_with_gemini(
-    articles: list[dict], model: genai.GenerativeModel
-) -> list[dict]:
+def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     """
     Отправляет заголовки всех статей одним запросом в Gemini.
     Gemini возвращает JSON {"relevant_ids": [...]}.
@@ -568,8 +630,7 @@ def filter_relevant_with_gemini(
     log.info("Отправляю %d заголовков в Gemini для фильтрации…", len(articles))
 
     try:
-        response = model.generate_content(prompt)
-        response_text = response.text
+        response_text = gemini_generate(prompt)
         log.debug("Ответ Gemini (фильтрация): %s", response_text[:300])
     except Exception as exc:
         log.error("Ошибка вызова Gemini API при фильтрации: %s", exc)
@@ -597,8 +658,8 @@ def filter_relevant_with_gemini(
 # ---------------------------------------------------------------------------
 
 
-def generate_post(article: dict, model: genai.GenerativeModel) -> str:
-    """Генерирует готовый пост через Google Gemini API."""
+def generate_post(article: dict) -> str:
+    """Генерирует готовый пост через Google Gemini REST API."""
     prompt = GEMINI_POST_PROMPT.format(
         title=article.get("title", "Без заголовка"),
         content=(article.get("content") or "")[:2000],
@@ -607,9 +668,7 @@ def generate_post(article: dict, model: genai.GenerativeModel) -> str:
     )
 
     log.info("Генерирую пост: «%s»", (article.get("title") or "")[:70])
-
-    response = model.generate_content(prompt)
-    return response.text
+    return gemini_generate(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -691,8 +750,6 @@ def main() -> None:
         )
         sys.exit(1)
 
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
     log.info("Используется модель: %s", GEMINI_MODEL)
 
     # 2. Читаем источники
@@ -713,7 +770,7 @@ def main() -> None:
         return
 
     # 4. Фильтруем релевантные через Gemini (один запрос на все заголовки)
-    relevant = filter_relevant_with_gemini(all_articles, model)
+    relevant = filter_relevant_with_gemini(all_articles)
 
     if not relevant:
         log.info("Релевантных материалов не найдено по оценке Gemini")
@@ -727,7 +784,7 @@ def main() -> None:
 
     for article in relevant:
         try:
-            post_text = generate_post(article, model)
+            post_text = generate_post(article)
             articles_with_posts.append((article, post_text))
             time.sleep(2)  # Пауза между вызовами Gemini API
         except Exception as exc:
