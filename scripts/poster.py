@@ -10,6 +10,7 @@ poster.py — Публикация постов из posts/*.md в Telegram-ка
     CHANNEL_ID — ID или @username канала (например: @my_channel или -1001234567890)
 """
 
+import argparse
 import logging
 import os
 import re
@@ -144,11 +145,12 @@ def sanitize_for_telegram(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def send_message(text: str) -> bool:
+def send_message(text: str, dry_run: bool = False) -> bool:
     """
     Отправляет сообщение в Telegram-канал через Bot API.
     Сначала пробует с HTML-разметкой; при ошибке разбора — без разметки.
-    Возвращает True при успехе.
+    В режиме dry_run показывает, что будет отправлено, без реальной отправки.
+    Возвращает True при успехе (или при dry_run).
     """
     api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendMessage"
     html_text = markdown_to_html(sanitize_for_telegram(text))
@@ -159,6 +161,17 @@ def send_message(text: str) -> bool:
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
+
+    if dry_run:
+        log.info("=== DRY RUN — пост НЕ отправлен ===")
+        log.info("chat_id: %s", CHANNEL_ID)
+        log.info("parse_mode: HTML")
+        log.info("disable_web_page_preview: False")
+        log.info("Длина текста: %d символов", len(html_text))
+        log.info("--- Текст поста (HTML) ---")
+        print(html_text)
+        log.info("--- Конец поста ---")
+        return True
 
     try:
         resp = requests.post(api_url, json=payload, timeout=30)
@@ -208,9 +221,10 @@ def send_message(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def process_file(post_file: Path) -> bool:
+def process_file(post_file: Path, dry_run: bool = False) -> bool:
     """
     Обрабатывает один файл: извлекает посты и отправляет в Telegram.
+    В режиме dry_run показывает посты без реальной отправки.
     Возвращает True, если все посты успешно отправлены (или файл пуст).
     """
     log.info("Обрабатываю файл: %s", post_file.name)
@@ -241,12 +255,12 @@ def process_file(post_file: Path) -> bool:
     all_sent = True
 
     for i, post_text in enumerate(posts):
-        if i > 0:
+        if i > 0 and not dry_run:
             log.info("Пауза %d сек перед следующим постом...", PAUSE_BETWEEN_POSTS)
             time.sleep(PAUSE_BETWEEN_POSTS)
 
         log.info("Отправляю пост %d/%d...", i + 1, len(posts))
-        success = send_message(post_text)
+        success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             all_sent = False
@@ -263,19 +277,35 @@ def process_file(post_file: Path) -> bool:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Публикация постов в Telegram-канал")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Показать посты без реальной отправки в Telegram",
+    )
+    parser.add_argument(
+        "--post",
+        action="store_true",
+        help="Реальная отправка постов в Telegram (поведение по умолчанию)",
+    )
+    args = parser.parse_args()
+
+    dry_run = args.dry_run
+
     log.info("=" * 60)
-    log.info("Запуск постера")
+    log.info("Запуск постера%s", " (DRY RUN)" if dry_run else "")
     log.info("=" * 60)
 
-    # Проверяем обязательные переменные окружения
-    if not BOT_TOKEN:
+    # Проверяем обязательные переменные окружения (в dry-run BOT_TOKEN/CHANNEL_ID
+    # не обязательны для вывода, но нужны для формирования payload)
+    if not BOT_TOKEN and not dry_run:
         log.error(
             "BOT_TOKEN не установлен. "
             "Добавьте его в .env или GitHub Secrets."
         )
         sys.exit(1)
 
-    if not CHANNEL_ID:
+    if not CHANNEL_ID and not dry_run:
         log.error(
             "CHANNEL_ID не установлен. "
             "Добавьте его в .env или GitHub Secrets."
@@ -302,9 +332,9 @@ def main() -> None:
 
     for post_file in candidates:
         try:
-            success = process_file(post_file)
+            success = process_file(post_file, dry_run=dry_run)
 
-            if success:
+            if success and not dry_run:
                 # Переименовываем: 2026-03-01_09.md → 2026-03-01_09_posted.md
                 new_name = post_file.stem + "_posted.md"
                 new_path = post_file.parent / new_name
@@ -314,6 +344,11 @@ def main() -> None:
                     "✓ Файл помечен как опубликованный: %s → %s",
                     post_file.name,
                     new_name,
+                )
+            elif success and dry_run:
+                log.info(
+                    "DRY RUN: файл %s НЕ переименован и НЕ помечен",
+                    post_file.name,
                 )
             else:
                 log.error(
@@ -331,7 +366,7 @@ def main() -> None:
             log_error(post_file.name, str(exc))
 
     log.info("=" * 60)
-    log.info("Постер завершил работу")
+    log.info("Постер завершил работу%s", " (DRY RUN)" if dry_run else "")
     log.info("=" * 60)
 
 

@@ -108,7 +108,7 @@ telegram-channel-land-water/
 **Ключевые константы:**
 | Константа | Значение | Назначение |
 |---|---|---|
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Модель Gemini API |
+| `GEMINI_MODEL` | `gemini-3.1-flash-lite-preview` | Модель Gemini API |
 | `MAX_ARTICLES_PER_SOURCE` | 10 | Статей с каждого источника |
 | `MAX_POSTS_TO_GENERATE` | 3 | Постов за один запуск |
 | `FILTER_BATCH_SIZE` | 80 | Заголовков в одном запросе к Gemini |
@@ -515,7 +515,7 @@ Fix HTML selector threshold for gov sites
 
 | Решение | Обоснование |
 |---|---|
-| Google Gemini API (`gemini-2.0-flash`) | Быстрая и бесплатная генерация; достаточно для текущей нагрузки |
+| Google Gemini API (`gemini-3.1-flash-lite-preview`) | Быстрая и бесплатная генерация; достаточно для текущей нагрузки |
 | Двухступенчатая фильтрация (keywords → Gemini) | Keyword-пре-фильтр сокращает батч для Gemini; Gemini добавляет семантику |
 | RSS → HTML fallback | RSS надёжнее и структурированнее; HTML как запасной вариант |
 | t.me/s/ для Telegram-каналов | Публичные каналы доступны без MTProto; просто и без доп. зависимостей |
