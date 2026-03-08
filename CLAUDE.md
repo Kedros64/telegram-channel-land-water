@@ -55,6 +55,8 @@ Telegram Bot API → Telegram-канал
 - 14:00 МСК (11:00 UTC) — `cron: '0 11 * * *'`
 - 19:00 МСК (16:00 UTC) — `cron: '0 16 * * *'`
 
+Также поддерживается ручной запуск через `workflow_dispatch` (кнопка Run workflow в UI и через API).
+
 ---
 
 ## Структура репозитория
@@ -94,7 +96,7 @@ telegram-channel-land-water/
 1. Читает `sources.xlsx`, фильтрует строки с `active` ∈ {да, yes, 1, true}
 2. Для каждого источника:
    - **`type = telegram`** — скрапит публичный веб-вид канала через `https://t.me/s/{channel}` (BeautifulSoup, без MTProto)
-   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 20 CSS-селекторами
+   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 32 CSS-селекторами
 3. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
 4. **Keyword pre-filter** (`pre_filter_by_keywords`): отсекает статьи без ключевых слов и со стоп-словами
 5. **Gemini API filter** (`filter_relevant_with_gemini`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
@@ -122,8 +124,8 @@ telegram-channel-land-water/
 **RSS-детекция:**
 Пробуемые пути (к домену источника): `/rss`, `/rss.xml`, `/feed`, `/feed.xml`, `/atom.xml`, `/news/rss`, `/news/feed`, `/export/rss`, `/lenta/rss`. Поддерживает RSS 2.0 и Atom.
 
-**CSS-селекторы для HTML-парсинга:**
-`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`
+**CSS-селекторы для HTML-парсинга (32 штуки):**
+`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`, `.news-feed__item`, `.page-news__item`, `.document-item`, `.law-item`, `.content-item`, `.col-news`, `.feed-item`, `tr.news`, `tr.item`, `td.news`, `td.item`
 
 Если ни один селектор не даёт ≥ 3 блоков — fallback на `h2/h3/h4` с дочерними ссылками.
 
@@ -203,7 +205,10 @@ Prompt (EN): [промпт для генерации изображения]
 [ГГГГ-ММ-ДД][ЧЧ:ММ] — релевантных материалов не найдено. Проверено источников: N
 ```
 
-**Важно:** Формат `**ГОТОВЫЙ ПОСТ:**` — чувствителен к точному написанию. Изменение влечёт правку регулярки в `poster.py:86`.
+**Важно:** Формат `**ГОТОВЫЙ ПОСТ:**` — чувствителен к точному написанию. Изменение влечёт правку регулярки в `poster.py` (строки ~85-88):
+```python
+r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n---|\n## Пост\s|\Z)"
+```
 
 ---
 
@@ -257,13 +262,34 @@ Fallback на keyword-filter если Gemini упал на всех батчах
 
 Ограничения:
 - Приватные каналы недоступны (возвращает 404)
-- Только последние ~20 сообщений из веб-вида
+- Только последние ~20 сообщений из веб-вида (берётся до 10 после фильтрации по минимальной длине)
 - Посты без текста (фото/видео) пропускаются
 
 Чтобы активировать Telegram-источник в `sources.xlsx`:
 - Задай `type = telegram`
 - Задай `active = да`
 - В поле `url` укажи `https://t.me/channelname` или `@channelname`
+
+---
+
+## GitHub Actions Workflow (monitor_and_post.yml)
+
+**Права:** `contents: write` (для git-коммитов).
+
+**Шаги (последовательно):**
+
+1. **Checkout** — полная история (`fetch-depth: 0`)
+2. **Setup Python 3.11** — с кешированием pip
+3. **Install dependencies** — `pip install -r requirements.txt`
+4. **Run monitor** — `python scripts/monitor.py` (секрет `GEMINI_API_KEY`)
+5. **Commit generated posts** — коммит `posts/*.md`, если есть изменения; перед пушем: `git pull --rebase --autostash`
+6. **Post to Telegram** — `python scripts/poster.py` (секреты `BOT_TOKEN`, `CHANNEL_ID`)
+7. **Commit post results** — коммит `_posted.md` переименований, если есть изменения; перед пушем: `git pull --rebase --autostash`
+8. **Notify owner** *(always runs, даже при ошибке)* — встроенный Python-скрипт читает последний `posts/*.md`, извлекает счётчик релевантных материалов и отправляет сводку владельцу бота.
+
+**Формат уведомления:**
+- Нет материалов: `📭 Новых материалов нет...`
+- Есть материалы: `✅ Опубликовано постов: N...`
 
 ---
 
@@ -349,6 +375,7 @@ python scripts/poster.py
 |---------|---------|
 | `/run` | Немедленный запуск мониторинга и публикации постов |
 | `/status` | Показывает время последней проверки (`last_check.txt`) |
+| `/start` | Приветственное сообщение |
 | `/help` | Список команд |
 
 ### Настройка (один раз)
@@ -511,4 +538,4 @@ Fix HTML selector threshold for gov sites
 
 ---
 
-*Последнее обновление: 2026-03-04 — Обновление документации по текущему состоянию кода*
+*Последнее обновление: 2026-03-08 — Уточнение CSS-селекторов (20→32), regex poster.py, шаги workflow (Notify owner), команды trigger_bot (/start), детали парсинга Telegram*
