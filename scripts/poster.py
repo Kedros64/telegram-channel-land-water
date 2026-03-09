@@ -36,8 +36,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
-PAUSE_BETWEEN_POSTS = 30   # секунды между постами из одного файла
+PAUSE_BETWEEN_POSTS = 30    # секунды между постами из одного файла
 TELEGRAM_MAX_LENGTH = 4096  # максимум символов в одном сообщении Telegram
+TELEGRAM_CAPTION_MAX = 1024  # максимум символов в подписи к фото
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,18 +78,35 @@ def log_error(filename: str, error: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def extract_posts(content: str) -> list[str]:
+def extract_posts(content: str) -> list[tuple[str, str | None]]:
     """
     Извлекает все блоки «ГОТОВЫЙ ПОСТ:» из markdown-файла.
-    Возвращает список текстов постов (без заголовка блока).
+    Возвращает список кортежей (текст_поста, имя_файла_изображения_или_None).
     """
-    # Ищем всё между **ГОТОВЫЙ ПОСТ:** и следующим разделителем
-    pattern = re.compile(
+    # Разбиваем на блоки по разделителю "## Пост N"
+    # Каждый блок содержит метаданные поста + текст + опциональное **ИЗОБРАЖЕНИЕ:**
+    post_pattern = re.compile(
         r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n---|\n## Пост\s|\Z)",
         re.DOTALL,
     )
-    posts = [m.group(1).strip() for m in pattern.finditer(content)]
-    return [p for p in posts if p]
+    image_pattern = re.compile(r"\*\*ИЗОБРАЖЕНИЕ:\*\*\s*(\S+\.png)")
+
+    # Разбиваем на секции "## Пост N" чтобы матчить изображение к нужному посту
+    sections = re.split(r"\n---\n\n## Пост \d+\n", content)
+
+    results = []
+    for section in sections:
+        post_match = post_pattern.search(section)
+        if not post_match:
+            continue
+        post_text = post_match.group(1).strip()
+        if not post_text:
+            continue
+        img_match = image_pattern.search(section)
+        image_filename = img_match.group(1).strip() if img_match else None
+        results.append((post_text, image_filename))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +234,53 @@ def send_message(text: str, dry_run: bool = False) -> bool:
         return False
 
 
+def send_photo(image_path: Path, caption: str, dry_run: bool = False) -> bool:
+    """
+    Отправляет фото с подписью в Telegram-канал через sendPhoto.
+    Если изображение не удалось отправить — возвращает False,
+    и caller должен откатиться на send_message (пост без картинки).
+    """
+    api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendPhoto"
+    html_caption = markdown_to_html(sanitize_for_telegram(caption))
+    # Telegram ограничивает подпись к фото 1024 символами
+    if len(html_caption) > TELEGRAM_CAPTION_MAX:
+        html_caption = html_caption[: TELEGRAM_CAPTION_MAX - 3] + "..."
+
+    if dry_run:
+        log.info("=== DRY RUN — фото НЕ отправлено: %s ===", image_path.name)
+        log.info("caption (%d символов): %s…", len(html_caption), html_caption[:80])
+        return True
+
+    try:
+        with open(image_path, "rb") as f:
+            resp = requests.post(
+                api_url,
+                data={
+                    "chat_id": CHANNEL_ID,
+                    "caption": html_caption,
+                    "parse_mode": "HTML",
+                },
+                files={"photo": (image_path.name, f, "image/png")},
+                timeout=60,
+            )
+        data = resp.json()
+
+        if data.get("ok"):
+            msg_id = data.get("result", {}).get("message_id", "?")
+            log.info("✓ Фото с постом отправлено (message_id=%s)", msg_id)
+            return True
+
+        log.warning(
+            "Telegram sendPhoto вернул ошибку: %s — откат на sendMessage",
+            data.get("description", "?"),
+        )
+        return False
+
+    except Exception as exc:
+        log.warning("Ошибка при отправке фото (%s): %s — откат на sendMessage", image_path.name, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Обработка файлов
 # ---------------------------------------------------------------------------
@@ -254,13 +319,25 @@ def process_file(post_file: Path, dry_run: bool = False) -> bool:
     log.info("Найдено постов для отправки: %d", len(posts))
     all_sent = True
 
-    for i, post_text in enumerate(posts):
+    for i, (post_text, image_filename) in enumerate(posts):
         if i > 0 and not dry_run:
             log.info("Пауза %d сек перед следующим постом...", PAUSE_BETWEEN_POSTS)
             time.sleep(PAUSE_BETWEEN_POSTS)
 
         log.info("Отправляю пост %d/%d...", i + 1, len(posts))
-        success = send_message(post_text, dry_run=dry_run)
+
+        # Пробуем отправить с изображением, если оно есть
+        success = False
+        if image_filename:
+            image_path = POSTS_DIR / image_filename
+            if image_path.exists():
+                success = send_photo(image_path, post_text, dry_run=dry_run)
+            else:
+                log.warning("Файл изображения не найден: %s — отправляю без картинки", image_filename)
+
+        # Fallback: отправка только текста (и основной путь если картинки нет)
+        if not success:
+            success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             all_sent = False

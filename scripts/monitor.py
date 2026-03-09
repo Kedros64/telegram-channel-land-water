@@ -10,6 +10,7 @@ monitor.py — Мониторинг источников и генерация �
     DEEPSEEK_API_KEY — ключ API DeepSeek
 """
 
+import base64
 import json
 import logging
 import os
@@ -46,6 +47,9 @@ LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_IMAGE_MODEL = "gpt-image-1-mini"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
@@ -204,6 +208,69 @@ def deepseek_generate(prompt: str) -> str:
                 continue
             raise
     raise RuntimeError(f"DeepSeek API: исчерпаны все попытки. Последняя ошибка: {last_exc}")
+
+
+def extract_image_prompt(post_text: str) -> str:
+    """
+    Извлекает английский промпт из секции **ВИЗУАЛ:** сгенерированного поста.
+    Возвращает строку или '' если секция отсутствует.
+    """
+    match = re.search(r"Prompt \(EN\):\s*(.+?)(?:\n|$)", post_text)
+    if match:
+        return match.group(1).strip().strip("[]")
+    return ""
+
+
+def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None:
+    """
+    Генерирует изображение через OpenAI Images API (gpt-image-1-mini).
+    Сохраняет PNG в posts/YYYY-MM-DD_HH_post_N.png.
+    При любой ошибке логирует предупреждение и возвращает None —
+    пост в любом случае будет опубликован, просто без картинки.
+    """
+    if not OPENAI_API_KEY:
+        log.debug("OPENAI_API_KEY не задан — генерация изображений пропущена")
+        return None
+
+    log.info("Генерирую изображение для поста %d…", post_num)
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENAI_IMAGE_MODEL,
+                "prompt": prompt[:1000],  # API limit
+                "size": "1024x1024",
+                "quality": "low",
+                "n": 1,
+            },
+            timeout=90,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        b64_data = data["data"][0].get("b64_json")
+        if not b64_data:
+            log.warning("OpenAI Images API не вернул b64_json для поста %d", post_num)
+            return None
+
+        img_bytes = base64.b64decode(b64_data)
+        filename = now_msk.strftime("%Y-%m-%d_%H") + f"_post_{post_num}.png"
+        img_path = POSTS_DIR / filename
+        img_path.write_bytes(img_bytes)
+        log.info("Изображение сохранено: %s (%d KB)", filename, len(img_bytes) // 1024)
+        return img_path
+
+    except requests.exceptions.HTTPError as exc:
+        log.warning("OpenAI Images API HTTP-ошибка (пост %d): %s", post_num, exc)
+    except requests.exceptions.Timeout:
+        log.warning("OpenAI Images API: таймаут (пост %d)", post_num)
+    except Exception as exc:
+        log.warning("Не удалось сгенерировать изображение (пост %d): %s", post_num, exc)
+    return None
 
 
 def moscow_now() -> datetime:
@@ -811,7 +878,7 @@ def build_output(
         )
         return "\n".join(lines)
 
-    for i, (article, post_text) in enumerate(articles_with_posts, start=1):
+    for i, (article, post_text, image_path) in enumerate(articles_with_posts, start=1):
         lines += [
             "---",
             "",
@@ -819,6 +886,10 @@ def build_output(
             "",
             f"**Источник:** {article.get('source_name', '')} — {article.get('url', '')}",
             f"**Суть:** {article.get('title', '')}",
+        ]
+        if image_path:
+            lines.append(f"**ИЗОБРАЖЕНИЕ:** {image_path.name}")
+        lines += [
             "",
             post_text.strip(),
             "",
@@ -911,7 +982,19 @@ def main() -> None:
     for article in relevant:
         try:
             post_text = generate_post(article)
-            articles_with_posts.append((article, post_text))
+
+            # Генерируем изображение если задан OPENAI_API_KEY
+            image_path = None
+            if OPENAI_API_KEY:
+                img_prompt = extract_image_prompt(post_text)
+                if img_prompt:
+                    image_path = generate_image(
+                        img_prompt, now_msk, len(articles_with_posts) + 1
+                    )
+                else:
+                    log.debug("Промпт для изображения не найден в посте — пропускаю генерацию")
+
+            articles_with_posts.append((article, post_text, image_path))
             time.sleep(2)  # Пауза между вызовами DeepSeek API
         except Exception as exc:
             log.error(
