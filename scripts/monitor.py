@@ -620,7 +620,7 @@ def collect_all_articles(sources: list[dict]) -> list[dict]:
 
 def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
     """
-    Извлекает список relevant_ids из ответа Gemini.
+    Извлекает список relevant_ids из ответа DeepSeek.
     Обрабатывает варианты: чистый JSON, JSON в ```-блоке, частично сломанный ответ.
     """
     # Убираем markdown-обёртку если есть
@@ -636,7 +636,7 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
         return []
 
 
-FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к Gemini
+FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к DeepSeek
 
 # Ключевые слова для пре-фильтрации (до DeepSeek) и fallback (если DeepSeek недоступен)
 RELEVANCE_KEYWORDS = [
@@ -686,7 +686,7 @@ def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
     return result
 
 
-def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
+def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
     """
     Отправляет заголовки статей в DeepSeek для фильтрации.
     Если заголовков > FILTER_BATCH_SIZE — разбивает на батчи по 80 штук,
@@ -896,7 +896,7 @@ def main() -> None:
         return
 
     # 5. Финальная фильтрация через Gemini (работает только с уже отфильтрованным пулом)
-    relevant = filter_relevant_with_gemini(prefiltered)
+    relevant = filter_relevant_with_deepseek(prefiltered)
 
     if not relevant:
         log.info("Релевантных материалов не найдено по оценке Gemini")
