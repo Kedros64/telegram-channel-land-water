@@ -397,6 +397,7 @@ def main() -> None:
         p
         for p in POSTS_DIR.glob("*.md")
         if not p.stem.endswith("_posted")
+        and not p.stem.startswith("regen_")   # regen.py файлы не публикуем автоматически
         and p.name not in posted
         and p.name not in {"posted.log", "errors.log"}
     )

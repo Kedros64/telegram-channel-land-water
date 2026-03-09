@@ -5,6 +5,10 @@
 posts/posted.log
 posts/errors.log
 
+# Тестовые файлы regen.py — не коммитим, только для локальной отладки
+posts/regen_*.md
+posts/regen_*.png
+
 # Python
 __pycache__/
 *.py[cod]

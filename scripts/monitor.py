@@ -44,6 +44,7 @@ REPO_ROOT = Path(__file__).parent.parent
 POSTS_DIR = REPO_ROOT / "posts"
 SOURCES_FILE = REPO_ROOT / "sources.xlsx"
 LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
+ARTICLES_CACHE_FILE = POSTS_DIR / "articles_cache.json"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
@@ -965,6 +966,16 @@ def main() -> None:
         save_output(content, now_msk)
         save_last_check(now_utc)
         return
+
+    # Сохраняем кэш для regen.py — повторная генерация без парсинга источников
+    try:
+        POSTS_DIR.mkdir(exist_ok=True)
+        ARTICLES_CACHE_FILE.write_text(
+            json.dumps(prefiltered, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        log.info("Кэш статей сохранён: %d записей → %s", len(prefiltered), ARTICLES_CACHE_FILE.name)
+    except Exception as exc:
+        log.warning("Не удалось сохранить кэш статей: %s", exc)
 
     # 5. Финальная фильтрация через Gemini (работает только с уже отфильтрованным пулом)
     relevant = filter_relevant_with_deepseek(prefiltered)
