@@ -45,6 +45,7 @@ POSTS_DIR = REPO_ROOT / "posts"
 SOURCES_FILE = REPO_ROOT / "sources.xlsx"
 LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
 ARTICLES_CACHE_FILE = POSTS_DIR / "articles_cache.json"
+ARTICLES_POOL_FILE  = POSTS_DIR / "articles_pool.json"   # Накопительный пул статей
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
@@ -53,7 +54,25 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_IMAGE_MODEL = "gpt-image-1-mini"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
-MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
+
+# Квоты постов за один сеанс публикации: 2 земельных + 1 водный
+LAND_POSTS_COUNT  = 2
+WATER_POSTS_COUNT = 1
+
+# Статьи старше этого числа дней удаляются из пула (если уже использованы)
+POOL_MAX_AGE_DAYS = 14
+
+# Ключевые слова для классификации статей по тематике
+WATER_CATEGORY_KEYWORDS = [
+    "водн", "гтс", "пруд", "водоём", "водоем",
+    "береговая полоса", "водоохранн", "водопользован",
+    "гидротехнич", "росводресурс",
+]
+LAND_CATEGORY_KEYWORDS = [
+    "земельн", "кадастр", "росреестр", "аренда земли",
+    "межеван", "сервитут", "лесфонд", "рослесхоз",
+    "роснедр", "недр", "росприроднадзор", "минприрод", "экологическ",
+]
 
 # Пути RSS-фидов для перебора (добавляются к базовому URL)
 RSS_CANDIDATE_PATHS = [
@@ -761,13 +780,151 @@ def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Пул статей: классификация, накопление, выбор для генерации
+# ---------------------------------------------------------------------------
+
+
+def classify_article(article: dict) -> str:
+    """
+    Классифицирует статью как 'land', 'water' или 'both'.
+    Возвращает 'both' если содержит ключевые слова обеих тематик.
+    Fallback на 'land' если ни один водный ключ не найден.
+    """
+    text = (
+        (article.get("title") or "") + " " + (article.get("content") or "")
+    ).lower()
+    has_water = any(kw in text for kw in WATER_CATEGORY_KEYWORDS)
+    has_land  = any(kw in text for kw in LAND_CATEGORY_KEYWORDS)
+    if has_water and has_land:
+        return "both"
+    if has_water:
+        return "water"
+    return "land"  # по умолчанию — земельная тематика
+
+
+def load_articles_pool() -> list[dict]:
+    """Загружает накопительный пул статей из JSON-файла."""
+    if not ARTICLES_POOL_FILE.exists():
+        return []
+    try:
+        return json.loads(ARTICLES_POOL_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Не удалось загрузить пул статей: %s", exc)
+        return []
+
+
+def save_articles_pool(pool: list[dict]) -> None:
+    """Сохраняет пул статей в JSON-файл."""
+    POSTS_DIR.mkdir(exist_ok=True)
+    ARTICLES_POOL_FILE.write_text(
+        json.dumps(pool, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def merge_into_pool(
+    pool: list[dict], new_articles: list[dict], now_msk: datetime
+) -> list[dict]:
+    """
+    Добавляет новые статьи в пул (дедупликация по URL).
+    Удаляет статьи, которые: уже использованы И старше POOL_MAX_AGE_DAYS дней.
+    Неиспользованные статьи хранятся пока не будут опубликованы.
+    """
+    existing_urls = {a.get("url", "") for a in pool}
+    added = 0
+    for article in new_articles:
+        url = article.get("url", "")
+        if not url or url in existing_urls:
+            continue
+        pool.append({
+            **article,
+            "collected_at": now_msk.isoformat(),
+            "category": classify_article(article),
+            "used": False,
+        })
+        existing_urls.add(url)
+        added += 1
+
+    # Очистка: удаляем использованные статьи старше POOL_MAX_AGE_DAYS
+    cutoff_str = (now_msk - timedelta(days=POOL_MAX_AGE_DAYS)).isoformat()
+    before = len(pool)
+    pool = [
+        a for a in pool
+        if not a.get("used") or a.get("collected_at", "") > cutoff_str
+    ]
+    purged = before - len(pool)
+
+    log.info(
+        "Пул: добавлено %d новых, удалено %d устаревших, итого %d статей (%d неиспользованных)",
+        added, purged, len(pool),
+        sum(1 for a in pool if not a.get("used")),
+    )
+    return pool
+
+
+def select_posts_from_pool(pool: list[dict]) -> list[dict]:
+    """
+    Выбирает из пула LAND_POSTS_COUNT земельных + WATER_POSTS_COUNT водных статей.
+    Среди неиспользованных — берёт самые свежие.
+    Статьи с category='both' могут закрыть любой слот.
+    """
+    # Только неиспользованные, от свежих к старым
+    unused = sorted(
+        [a for a in pool if not a.get("used")],
+        key=lambda a: a.get("collected_at", ""),
+        reverse=True,
+    )
+
+    selected: list[dict] = []
+    selected_urls: set[str] = set()
+    water_count = 0
+    land_count  = 0
+
+    # Сначала закрываем водный слот (1 статья)
+    for a in unused:
+        if water_count >= WATER_POSTS_COUNT:
+            break
+        if a.get("category") in ("water", "both"):
+            selected.append(a)
+            selected_urls.add(a["url"])
+            water_count += 1
+
+    # Затем земельные (2 статьи)
+    for a in unused:
+        if land_count >= LAND_POSTS_COUNT:
+            break
+        if a["url"] in selected_urls:
+            continue
+        if a.get("category") in ("land", "both"):
+            selected.append(a)
+            selected_urls.add(a["url"])
+            land_count += 1
+
+    log.info(
+        "Выбрано из пула: %d земельных + %d водных (квота: %d + %d)",
+        land_count, water_count, LAND_POSTS_COUNT, WATER_POSTS_COUNT,
+    )
+    if land_count < LAND_POSTS_COUNT:
+        log.warning(
+            "Земельных статей в пуле недостаточно: %d из %d",
+            land_count, LAND_POSTS_COUNT,
+        )
+    if water_count < WATER_POSTS_COUNT:
+        log.warning(
+            "Водных статей в пуле недостаточно: %d из %d",
+            water_count, WATER_POSTS_COUNT,
+        )
+    return selected
+
+
 def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
     """
     Отправляет заголовки статей в DeepSeek для фильтрации.
     Если заголовков > FILTER_BATCH_SIZE — разбивает на батчи по 80 штук,
     обрабатывает последовательно с паузой 2 сек между батчами.
     При недоступности DeepSeek API — fallback на keyword-фильтрацию.
-    Возвращает отфильтрованный список статей (максимум MAX_POSTS_TO_GENERATE).
+    Возвращает все найденные релевантные статьи (без ограничения количества).
+    Ограничение по количеству постов накладывается позже при выборе из пула.
     """
     if not articles:
         return []
@@ -830,14 +987,14 @@ def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
         )
         fallback = pre_filter_by_keywords(articles)
         log.info("Keyword-fallback: %d релевантных из %d", len(fallback), len(articles))
-        return fallback[:MAX_POSTS_TO_GENERATE]
+        return fallback
 
     if not all_relevant:
         log.info("DeepSeek не нашёл релевантных новостей")
         return []
 
     log.info("Итого релевантных: %d из %d", len(all_relevant), len(articles))
-    return all_relevant[:MAX_POSTS_TO_GENERATE]
+    return all_relevant
 
 
 # ---------------------------------------------------------------------------
@@ -984,20 +1141,38 @@ def main() -> None:
     except Exception as exc:
         log.warning("Не удалось сохранить кэш статей: %s", exc)
 
-    # 5. Финальная фильтрация через Gemini (работает только с уже отфильтрованным пулом)
+    # 5. Финальная фильтрация через DeepSeek — возвращает все релевантные (без лимита)
     relevant = filter_relevant_with_deepseek(prefiltered)
 
-    if not relevant:
-        log.info("Релевантных материалов не найдено по оценке Gemini")
+    # 6. Обновляем накопительный пул статей
+    #    - Добавляем новые релевантные статьи (дедупликация по URL)
+    #    - Удаляем устаревшие использованные записи
+    pool = load_articles_pool()
+    pool = merge_into_pool(pool, relevant, now_msk)
+
+    # 7. Выбираем статьи для генерации: 2 земельных + 1 водный
+    #    Если в текущем запуске нет нужной категории — берём из пула прошлых запусков
+    to_generate = select_posts_from_pool(pool)
+
+    if not to_generate:
+        log.info("Нет доступных статей для генерации постов (пул пуст)")
+        save_articles_pool(pool)
         content = build_output([], now_msk, len(sources))
         save_output(content, now_msk)
         save_last_check(now_utc)
         return
 
-    # 6. Генерируем посты для релевантных статей
+    # Отмечаем выбранные статьи как использованные — не попадут в следующий запуск
+    used_urls = {a["url"] for a in to_generate}
+    for a in pool:
+        if a.get("url") in used_urls:
+            a["used"] = True
+    save_articles_pool(pool)
+
+    # 8. Генерируем посты для выбранных статей
     articles_with_posts: list[tuple] = []
 
-    for article in relevant:
+    for article in to_generate:
         try:
             post_text = generate_post(article)
 
@@ -1021,7 +1196,7 @@ def main() -> None:
                 exc,
             )
 
-    # 6. Сохраняем результат
+    # 9. Сохраняем результат
     content = build_output(articles_with_posts, now_msk, len(sources))
     save_output(content, now_msk)
     save_last_check(now_utc)
