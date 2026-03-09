@@ -7,7 +7,7 @@ monitor.py — Мониторинг источников и генерация �
     python scripts/monitor.py
 
 Переменные окружения:
-    GEMINI_API_KEY — ключ API Google Gemini
+    DEEPSEEK_API_KEY — ключ API DeepSeek
 """
 
 import json
@@ -27,6 +27,7 @@ import openpyxl
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import OpenAI
 
 # Некоторые госсайты используют самоподписанные или устаревшие сертификаты
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -42,12 +43,9 @@ REPO_ROOT = Path(__file__).parent.parent
 POSTS_DIR = REPO_ROOT / "posts"
 SOURCES_FILE = REPO_ROOT / "sources.xlsx"
 LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_API_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "{model}:generateContent?key={key}"
-)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_API_BASE = "https://api.deepseek.com"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
@@ -113,10 +111,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Промпты для Gemini API
+# Промпты для DeepSeek API
 # ---------------------------------------------------------------------------
 
-GEMINI_FILTER_PROMPT = """\
+DEEPSEEK_FILTER_PROMPT = """\
 Ты — редактор Telegram-канала о земельном и водном праве России.
 Вот пронумерованный список заголовков новостей с разных сайтов:
 
@@ -136,7 +134,7 @@ GEMINI_FILTER_PROMPT = """\
 Если подходящих новостей нет — верни: {{"relevant_ids": []}}
 """
 
-GEMINI_POST_PROMPT = """\
+DEEPSEEK_POST_PROMPT = """\
 Ты — редактор Telegram-канала о земельном и водном праве России.
 Канал читают предприниматели, фермеры, арендаторы, владельцы участков и водоёмов.
 Автор канала — консультант по оформлению водопользования, ГТС, прудов, земельных участков и лесфонда.
@@ -176,32 +174,36 @@ Prompt (EN): [промпт для Midjourney/DALL-E, flat design или editoria
 # ---------------------------------------------------------------------------
 
 
-def gemini_generate(prompt: str) -> str:
+def deepseek_generate(prompt: str) -> str:
     """
-    Вызывает Gemini REST API напрямую через requests.
+    Вызывает DeepSeek API через openai-совместимый клиент.
     При ошибке 429 делает до 3 повторных попыток с задержкой 5/10/20 сек.
     """
-    url = GEMINI_API_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
-    }
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_API_BASE)
     delays = [5, 10, 20]
+    last_exc = None
     for attempt in range(1, len(delays) + 2):  # попытки 1..4
-        resp = requests.post(url, json=payload, timeout=60)
-        if resp.status_code == 429 and attempt <= len(delays):
-            wait = delays[attempt - 1]
-            log.warning(
-                "Gemini API: 429 Too Many Requests (попытка %d/4), жду %d сек…",
-                attempt, wait,
+        try:
+            response = client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2048,
             )
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    # Последняя попытка уже выкинула исключение через raise_for_status
-    raise RuntimeError("Gemini API: исчерпаны все попытки")
+            return response.choices[0].message.content
+        except Exception as exc:
+            err_str = str(exc)
+            if "429" in err_str and attempt <= len(delays):
+                wait = delays[attempt - 1]
+                log.warning(
+                    "DeepSeek API: 429 Too Many Requests (попытка %d/4), жду %d сек…",
+                    attempt, wait,
+                )
+                time.sleep(wait)
+                last_exc = exc
+                continue
+            raise
+    raise RuntimeError(f"DeepSeek API: исчерпаны все попытки. Последняя ошибка: {last_exc}")
 
 
 def moscow_now() -> datetime:
@@ -612,7 +614,7 @@ def collect_all_articles(sources: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Фильтрация релевантных статей через Gemini API
+# Фильтрация релевантных статей через DeepSeek API
 # ---------------------------------------------------------------------------
 
 
@@ -630,13 +632,13 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
         # Оставляем только корректные числовые ID в допустимом диапазоне
         return [int(i) for i in ids if isinstance(i, (int, float)) and 1 <= int(i) <= max_id]
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        log.warning("Не удалось разобрать JSON от Gemini: %s | Ответ: %s", exc, clean[:200])
+        log.warning("Не удалось разобрать JSON от DeepSeek: %s | Ответ: %s", exc, clean[:200])
         return []
 
 
 FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к Gemini
 
-# Ключевые слова для пре-фильтрации (до Gemini) и fallback (если Gemini недоступен)
+# Ключевые слова для пре-фильтрации (до DeepSeek) и fallback (если DeepSeek недоступен)
 RELEVANCE_KEYWORDS = [
     "земельн",
     "водн",
@@ -668,7 +670,7 @@ STOP_WORDS = ["убийство", "теракт", "наркотики"]
 def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
     """
     Пре-фильтрация по ключевым словам.
-    Используется до отправки в Gemini (сокращает батч) и как fallback когда Gemini недоступен.
+    Используется до отправки в DeepSeek (сокращает батч) и как fallback когда DeepSeek недоступен.
     Статья проходит если содержит хотя бы одно ключевое слово в title+content (без учёта регистра)
     и не содержит жёстких стоп-слов.
     """
@@ -686,10 +688,10 @@ def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
 
 def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     """
-    Отправляет заголовки статей в Gemini для фильтрации.
+    Отправляет заголовки статей в DeepSeek для фильтрации.
     Если заголовков > FILTER_BATCH_SIZE — разбивает на батчи по 80 штук,
     обрабатывает последовательно с паузой 2 сек между батчами.
-    При недоступности Gemini API — fallback на keyword-фильтрацию.
+    При недоступности DeepSeek API — fallback на keyword-фильтрацию.
     Возвращает отфильтрованный список статей (максимум MAX_POSTS_TO_GENERATE).
     """
     if not articles:
@@ -702,12 +704,12 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     ]
     total_batches = len(batches)
     log.info(
-        "Отправляю %d заголовков в Gemini для фильтрации (батчей: %d)…",
+        "Отправляю %d заголовков в DeepSeek для фильтрации (батчей: %d)…",
         len(articles), total_batches,
     )
 
     all_relevant: list[dict] = []
-    gemini_failed_batches = 0
+    deepseek_failed_batches = 0
 
     for batch_num, batch in enumerate(batches, start=1):
         # Нумерация внутри батча начинается с 1 — IDs локальные
@@ -718,16 +720,16 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
             headlines_lines.append(f"{idx}. [{source}] {title}")
 
         headlines_list = "\n".join(headlines_lines)
-        prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
+        prompt = DEEPSEEK_FILTER_PROMPT.format(headlines_list=headlines_list)
 
         log.info("Батч %d/%d: %d заголовков", batch_num, total_batches, len(batch))
 
         try:
-            response_text = gemini_generate(prompt)
-            log.debug("Ответ Gemini (батч %d): %s", batch_num, response_text[:300])
+            response_text = deepseek_generate(prompt)
+            log.debug("Ответ DeepSeek (батч %d): %s", batch_num, response_text[:300])
         except Exception as exc:
-            log.error("Ошибка Gemini API при фильтрации батча %d: %s", batch_num, exc)
-            gemini_failed_batches += 1
+            log.error("Ошибка DeepSeek API при фильтрации батча %d: %s", batch_num, exc)
+            deepseek_failed_batches += 1
             if batch_num < total_batches:
                 time.sleep(2)
             continue
@@ -744,10 +746,10 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
         if batch_num < total_batches:
             time.sleep(2)
 
-    # Если Gemini не ответил ни на один батч — используем keyword-fallback
-    if gemini_failed_batches == total_batches:
+    # Если DeepSeek не ответил ни на один батч — используем keyword-fallback
+    if deepseek_failed_batches == total_batches:
         log.warning(
-            "Gemini API недоступен (все %d батчей упали) — "
+            "DeepSeek API недоступен (все %d батчей упали) — "
             "переключаюсь на keyword-фильтрацию",
             total_batches,
         )
@@ -756,7 +758,7 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
         return fallback[:MAX_POSTS_TO_GENERATE]
 
     if not all_relevant:
-        log.info("Gemini не нашёл релевантных новостей")
+        log.info("DeepSeek не нашёл релевантных новостей")
         return []
 
     log.info("Итого релевантных: %d из %d", len(all_relevant), len(articles))
@@ -764,13 +766,13 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Генерация постов через Gemini API
+# Генерация постов через DeepSeek API
 # ---------------------------------------------------------------------------
 
 
 def generate_post(article: dict) -> str:
-    """Генерирует готовый пост через Google Gemini REST API."""
-    prompt = GEMINI_POST_PROMPT.format(
+    """Генерирует готовый пост через DeepSeek API."""
+    prompt = DEEPSEEK_POST_PROMPT.format(
         title=article.get("title", "Без заголовка"),
         content=(article.get("content") or "")[:2000],
         source_name=article.get("source_name", ""),
@@ -778,7 +780,7 @@ def generate_post(article: dict) -> str:
     )
 
     log.info("Генерирую пост: «%s»", (article.get("title") or "")[:70])
-    return gemini_generate(prompt)
+    return deepseek_generate(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -852,15 +854,15 @@ def main() -> None:
     log.info("Текущее время (МСК): %s", now_msk.strftime("%Y-%m-%d %H:%M"))
     log.info("Последняя проверка:  %s", last_check.isoformat())
 
-    # 1. Проверяем наличие Gemini API ключа сразу — он нужен для обоих шагов
-    if not GEMINI_API_KEY:
+    # 1. Проверяем наличие DeepSeek API ключа сразу — он нужен для обоих шагов
+    if not DEEPSEEK_API_KEY:
         log.error(
-            "GEMINI_API_KEY не установлен. "
+            "DEEPSEEK_API_KEY не установлен. "
             "Добавьте ключ в .env или GitHub Secrets."
         )
         sys.exit(1)
 
-    log.info("Используется модель: %s", GEMINI_MODEL)
+    log.info("Используется модель: %s", DEEPSEEK_MODEL)
 
     # 2. Читаем источники
     sources = read_sources()
@@ -910,7 +912,7 @@ def main() -> None:
         try:
             post_text = generate_post(article)
             articles_with_posts.append((article, post_text))
-            time.sleep(2)  # Пауза между вызовами Gemini API
+            time.sleep(2)  # Пауза между вызовами DeepSeek API
         except Exception as exc:
             log.error(
                 "Ошибка генерации поста для «%s»: %s",

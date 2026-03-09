@@ -32,7 +32,7 @@ jobs:
 
       - name: Run monitor (collect sources -> generate posts)
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           echo "=== Запуск мониторинга источников ==="
           python scripts/monitor.py
