@@ -234,32 +234,25 @@ def send_message(text: str, dry_run: bool = False) -> bool:
         return False
 
 
-def send_photo(image_path: Path, caption: str, dry_run: bool = False) -> bool:
+def send_photo(image_path: Path, dry_run: bool = False) -> bool:
     """
-    Отправляет фото с подписью в Telegram-канал через sendPhoto.
-    Если изображение не удалось отправить — возвращает False,
-    и caller должен откатиться на send_message (пост без картинки).
+    Отправляет фото без подписи в Telegram-канал через sendPhoto.
+    Текст поста отправляется отдельным сообщением после фото — это
+    обходит лимит caption (1024 символа) и позволяет публиковать
+    полный текст любой длины.
+    Возвращает False при ошибке — тогда публикуется только текст.
     """
     api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendPhoto"
-    html_caption = markdown_to_html(sanitize_for_telegram(caption))
-    # Telegram ограничивает подпись к фото 1024 символами
-    if len(html_caption) > TELEGRAM_CAPTION_MAX:
-        html_caption = html_caption[: TELEGRAM_CAPTION_MAX - 3] + "..."
 
     if dry_run:
         log.info("=== DRY RUN — фото НЕ отправлено: %s ===", image_path.name)
-        log.info("caption (%d символов): %s…", len(html_caption), html_caption[:80])
         return True
 
     try:
         with open(image_path, "rb") as f:
             resp = requests.post(
                 api_url,
-                data={
-                    "chat_id": CHANNEL_ID,
-                    "caption": html_caption,
-                    "parse_mode": "HTML",
-                },
+                data={"chat_id": CHANNEL_ID},
                 files={"photo": (image_path.name, f, "image/png")},
                 timeout=60,
             )
@@ -267,17 +260,17 @@ def send_photo(image_path: Path, caption: str, dry_run: bool = False) -> bool:
 
         if data.get("ok"):
             msg_id = data.get("result", {}).get("message_id", "?")
-            log.info("✓ Фото с постом отправлено (message_id=%s)", msg_id)
+            log.info("✓ Фото отправлено (message_id=%s)", msg_id)
             return True
 
         log.warning(
-            "Telegram sendPhoto вернул ошибку: %s — откат на sendMessage",
+            "Telegram sendPhoto вернул ошибку: %s — публикую только текст",
             data.get("description", "?"),
         )
         return False
 
     except Exception as exc:
-        log.warning("Ошибка при отправке фото (%s): %s — откат на sendMessage", image_path.name, exc)
+        log.warning("Ошибка при отправке фото (%s): %s — публикую только текст", image_path.name, exc)
         return False
 
 
@@ -326,18 +319,16 @@ def process_file(post_file: Path, dry_run: bool = False) -> bool:
 
         log.info("Отправляю пост %d/%d...", i + 1, len(posts))
 
-        # Пробуем отправить с изображением, если оно есть
-        success = False
+        # Отправляем фото отдельным сообщением (без caption) — обходим лимит 1024 символа
         if image_filename:
             image_path = POSTS_DIR / image_filename
             if image_path.exists():
-                success = send_photo(image_path, post_text, dry_run=dry_run)
+                send_photo(image_path, dry_run=dry_run)
             else:
                 log.warning("Файл изображения не найден: %s — отправляю без картинки", image_filename)
 
-        # Fallback: отправка только текста (и основной путь если картинки нет)
-        if not success:
-            success = send_message(post_text, dry_run=dry_run)
+        # Текст поста — всегда отдельным сообщением после фото
+        success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             all_sent = False

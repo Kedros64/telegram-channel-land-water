@@ -116,17 +116,16 @@ def send_posts_to_telegram(md_file: Path, dry_run: bool) -> None:
             time.sleep(REGEN_PAUSE_BETWEEN_POSTS)
 
         log.info("Отправляю пост %d/%d…", i + 1, len(posts))
-        success = False
 
+        # Фото — отдельным сообщением (без caption), текст — следом
         if image_filename:
             image_path = POSTS_DIR / image_filename
             if image_path.exists():
-                success = send_photo(image_path, post_text, dry_run=dry_run)
+                send_photo(image_path, dry_run=dry_run)
             else:
                 log.warning("Изображение не найдено: %s — отправляю без картинки", image_filename)
 
-        if not success:
-            success = send_message(post_text, dry_run=dry_run)
+        success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             log.error("Не удалось отправить пост %d", i + 1)
