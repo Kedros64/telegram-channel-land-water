@@ -862,59 +862,80 @@ def merge_into_pool(
     return pool
 
 
-def select_posts_from_pool(pool: list[dict]) -> list[dict]:
+def get_today_counts(pool: list[dict], today_str: str) -> tuple[int, int]:
     """
-    Выбирает из пула LAND_POSTS_COUNT земельных + WATER_POSTS_COUNT водных статей.
-    Среди неиспользованных — берёт самые свежие.
-    Статьи с category='both' могут закрыть любой слот.
+    Считает сколько земельных и водных постов уже выбрано/опубликовано сегодня.
+    Ориентируется на поле 'used_at' в пуле — ставится при выборе статьи для генерации.
     """
-    # Только неиспользованные, от свежих к старым
+    land = water = 0
+    for a in pool:
+        used_at = a.get("used_at", "")
+        if not used_at or not used_at.startswith(today_str):
+            continue
+        cat = a.get("category", "land")
+        if cat == "water":
+            water += 1
+        else:  # land или both → засчитываем в земельные
+            land += 1
+    return land, water
+
+
+def select_one_post_from_pool(pool: list[dict], today_str: str) -> dict | None:
+    """
+    Выбирает ОДНУ статью для текущего сеанса на основе суточной квоты:
+      LAND_POSTS_COUNT земельных + WATER_POSTS_COUNT водных в день.
+
+    Стратегия: приоритет — водная статья (их меньше в пуле), затем земельная.
+    Если нужной категории нет → пробуем другую (не оставляем слот пустым).
+    Возвращает None если суточная квота выполнена или пул пуст.
+    """
+    land_today, water_today = get_today_counts(pool, today_str)
+    log.info(
+        "Суточная квота — земельных: %d/%d, водных: %d/%d",
+        land_today, LAND_POSTS_COUNT, water_today, WATER_POSTS_COUNT,
+    )
+
+    need_land  = land_today  < LAND_POSTS_COUNT
+    need_water = water_today < WATER_POSTS_COUNT
+
+    if not need_land and not need_water:
+        log.info("Суточная квота постов выполнена — в этот сеанс пост не нужен")
+        return None
+
+    # Неиспользованные статьи, от свежих к старым
     unused = sorted(
         [a for a in pool if not a.get("used")],
         key=lambda a: a.get("collected_at", ""),
         reverse=True,
     )
 
-    selected: list[dict] = []
-    selected_urls: set[str] = set()
-    water_count = 0
-    land_count  = 0
+    if not unused:
+        log.warning("Пул статей пуст — нет материалов для поста")
+        return None
 
-    # Сначала закрываем водный слот (1 статья)
-    for a in unused:
-        if water_count >= WATER_POSTS_COUNT:
-            break
-        if a.get("category") in ("water", "both"):
-            selected.append(a)
-            selected_urls.add(a["url"])
-            water_count += 1
+    # Приоритет: сначала закрываем водный слот (он редкий)
+    if need_water:
+        for a in unused:
+            if a.get("category") in ("water", "both"):
+                log.info("Выбрана водная статья: %s", (a.get("title") or "")[:70])
+                return a
+        # Водных нет — используем земельную вместо (если земельный слот тоже нужен)
+        if need_land:
+            log.warning("Водных статей нет — берём земельную вместо водной")
+            for a in unused:
+                if a.get("category") in ("land", "both"):
+                    log.info("Выбрана земельная статья: %s", (a.get("title") or "")[:70])
+                    return a
 
-    # Затем земельные (2 статьи)
-    for a in unused:
-        if land_count >= LAND_POSTS_COUNT:
-            break
-        if a["url"] in selected_urls:
-            continue
-        if a.get("category") in ("land", "both"):
-            selected.append(a)
-            selected_urls.add(a["url"])
-            land_count += 1
+    # Земельный слот
+    if need_land:
+        for a in unused:
+            if a.get("category") in ("land", "both"):
+                log.info("Выбрана земельная статья: %s", (a.get("title") or "")[:70])
+                return a
 
-    log.info(
-        "Выбрано из пула: %d земельных + %d водных (квота: %d + %d)",
-        land_count, water_count, LAND_POSTS_COUNT, WATER_POSTS_COUNT,
-    )
-    if land_count < LAND_POSTS_COUNT:
-        log.warning(
-            "Земельных статей в пуле недостаточно: %d из %d",
-            land_count, LAND_POSTS_COUNT,
-        )
-    if water_count < WATER_POSTS_COUNT:
-        log.warning(
-            "Водных статей в пуле недостаточно: %d из %d",
-            water_count, WATER_POSTS_COUNT,
-        )
-    return selected
+    log.warning("Подходящих статей в пуле не найдено")
+    return None
 
 
 def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
@@ -1150,26 +1171,29 @@ def main() -> None:
     pool = load_articles_pool()
     pool = merge_into_pool(pool, relevant, now_msk)
 
-    # 7. Выбираем статьи для генерации: 2 земельных + 1 водный
-    #    Если в текущем запуске нет нужной категории — берём из пула прошлых запусков
-    to_generate = select_posts_from_pool(pool)
+    # 7. Выбираем 1 статью для текущего сеанса на основе суточной квоты
+    #    (2 земельных + 1 водный в день; если нужной категории нет — берём из пула прошлых запусков)
+    today_str = now_msk.strftime("%Y-%m-%d")
+    selected = select_one_post_from_pool(pool, today_str)
 
-    if not to_generate:
-        log.info("Нет доступных статей для генерации постов (пул пуст)")
+    if selected is None:
+        # Квота выполнена или пул пуст — сохраняем пул с новыми статьями, пост не генерируем
         save_articles_pool(pool)
         content = build_output([], now_msk, len(sources))
         save_output(content, now_msk)
         save_last_check(now_utc)
         return
 
-    # Отмечаем выбранные статьи как использованные — не попадут в следующий запуск
-    used_urls = {a["url"] for a in to_generate}
+    # Отмечаем выбранную статью как использованную с временной меткой
     for a in pool:
-        if a.get("url") in used_urls:
-            a["used"] = True
+        if a.get("url") == selected["url"]:
+            a["used"]    = True
+            a["used_at"] = now_msk.isoformat()
     save_articles_pool(pool)
 
-    # 8. Генерируем посты для выбранных статей
+    to_generate = [selected]
+
+    # 8. Генерируем пост для выбранной статьи
     articles_with_posts: list[tuple] = []
 
     for article in to_generate:
