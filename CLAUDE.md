@@ -94,7 +94,7 @@ telegram-channel-land-water/
 1. Читает `sources.xlsx`, фильтрует строки с `active` ∈ {да, yes, 1, true}
 2. Для каждого источника:
    - **`type = telegram`** — скрапит публичный веб-вид канала через `https://t.me/s/{channel}` (BeautifulSoup, без MTProto)
-   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 20 CSS-селекторами
+   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 30+ CSS-селекторами
 3. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
 4. **Keyword pre-filter** (`pre_filter_by_keywords`): отсекает статьи без ключевых слов и со стоп-словами
 5. **Gemini API filter** (`filter_relevant_with_gemini`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
@@ -122,8 +122,8 @@ telegram-channel-land-water/
 **RSS-детекция:**
 Пробуемые пути (к домену источника): `/rss`, `/rss.xml`, `/feed`, `/feed.xml`, `/atom.xml`, `/news/rss`, `/news/feed`, `/export/rss`, `/lenta/rss`. Поддерживает RSS 2.0 и Atom.
 
-**CSS-селекторы для HTML-парсинга:**
-`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`
+**CSS-селекторы для HTML-парсинга (30+):**
+`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`, `.news-feed__item`, `.page-news__item`, `.document-item`, `.event-card`, `.law-item`, `div.row-item`, `tr.news-row`, `td.news-title`
 
 Если ни один селектор не даёт ≥ 3 блоков — fallback на `h2/h3/h4` с дочерними ссылками.
 
@@ -137,7 +137,7 @@ telegram-channel-land-water/
 1. Сканирует `posts/*.md` — берёт файлы без суффикса `_posted` и не в `posted.log`
 2. Файлы с «релевантных материалов не найдено» без блока `ГОТОВЫЙ ПОСТ` — помечает обработанными без публикации
 3. Извлекает блоки `**ГОТОВЫЙ ПОСТ:**` регуляркой (шаблон до `**ВАРИАНТЫ CTA` или `---` или `## Пост`)
-4. Конвертирует Markdown → HTML: `[text](url)` → `<a>`, `**` → `<b>`, `*` → `<i>`, `` ` `` → `<code>`
+4. Конвертирует Markdown → HTML: `[text](url)` → `<a>`, `**text**` → `<b>text</b>`, `*text*` (одиночные звёздочки, negative lookahead) → `<i>text</i>`, `` `text` `` → `<code>text</code>`
 5. Обрезает до `TELEGRAM_MAX_LENGTH = 4096` символов; удаляет управляющие символы
 6. Отправляет каждый пост через `sendMessage` (parse_mode=HTML)
 7. При ошибке разбора HTML — повторяет без parse_mode
@@ -203,7 +203,12 @@ Prompt (EN): [промпт для генерации изображения]
 [ГГГГ-ММ-ДД][ЧЧ:ММ] — релевантных материалов не найдено. Проверено источников: N
 ```
 
-**Важно:** Формат `**ГОТОВЫЙ ПОСТ:**` — чувствителен к точному написанию. Изменение влечёт правку регулярки в `poster.py:86`.
+**Важно:** Формат `**ГОТОВЫЙ ПОСТ:**` — чувствителен к точному написанию. Изменение влечёт правку регулярки в `poster.py:85-87`.
+
+Точная регулярка (poster.py:85):
+```python
+r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n---|\n## Пост\s|\Z)"
+```
 
 ---
 
@@ -253,7 +258,11 @@ Fallback на keyword-filter если Gemini упал на всех батчах
 
 **Текущий статус: реализован без MTProto.**
 
-Функция `fetch_telegram_channel()` (monitor.py:286) скрапит **публичный веб-вид** канала через `https://t.me/s/{channel}`. Это работает для всех публичных каналов без API-ключей и авторизации.
+Функция `fetch_telegram_channel()` (monitor.py:300) скрапит **публичный веб-вид** канала через `https://t.me/s/{channel}`. Это работает для всех публичных каналов без API-ключей и авторизации.
+
+CSS-классы для парсинга Telegram веб-вида:
+- `.tgme_widget_message_wrap` — обёртка каждого сообщения
+- `.tgme_widget_message_text` — текст сообщения
 
 Ограничения:
 - Приватные каналы недоступны (возвращает 404)
@@ -313,6 +322,7 @@ Fallback на keyword-filter если Gemini упал на всех батчах
    - `Run monitor` — появится файл `posts/ГГГГ-ММ-ДД_ЧЧ.md`
    - `Post to Telegram` — посты появятся в канале
    - `Commit post results` — в репозитории файл переименуется в `_posted.md`
+   - `Notify owner` — бот отправит статус-сообщение владельцу (эмодзи ✅ или 📭)
 
 ### Шаг 7: Локальное тестирование
 
@@ -334,6 +344,38 @@ python scripts/monitor.py
 # Опубликовать посты
 python scripts/poster.py
 ```
+
+---
+
+## GitHub Actions workflow (monitor_and_post.yml)
+
+**Файл:** `.github/workflows/monitor_and_post.yml` (110 строк)
+
+### Триггеры
+
+- **По расписанию:** 3 раза в день — 06:00, 11:00, 16:00 UTC (09:00, 14:00, 19:00 МСК)
+- **Вручную:** `workflow_dispatch` (через GitHub UI или trigger_bot.py)
+
+### Шаги workflow
+
+| Шаг | Команда | Назначение |
+|-----|---------|-----------|
+| Checkout | `actions/checkout@v4` (fetch-depth: 0) | Полная история для rebase |
+| Python setup | `actions/setup-python@v5` (Python 3.11) | С кешем pip |
+| Install deps | `pip install -r requirements.txt` | 5 пакетов |
+| Run monitor | `python scripts/monitor.py` | Генерирует `posts/ГГГГ-ММ-ДД_ЧЧ.md` |
+| Commit posts | `git add posts/` | Коммит если есть изменения |
+| Post to Telegram | `python scripts/poster.py` | Публикует, переименовывает в `_posted.md` |
+| Commit results | `git add posts/` | Коммит переименованных файлов |
+| Notify owner | Python inline-скрипт | Отправляет статус через бота |
+
+### Особенности
+
+- **Rebase-стратегия:** `git pull --rebase --autostash` перед каждым push — предотвращает конфликты при параллельных запусках
+- **Условные коммиты:** `git diff --staged --quiet || git commit ...` — коммит только при реальных изменениях
+- **Сообщения коммитов:** `"Auto: posts 2026-03-10 17:01 UTC"` / `"Auto: mark posted 2026-03-10 17:01 UTC"`
+- **Уведомление владельца:** Последний шаг находит свежайший `.md` файл, извлекает счётчики и шлёт сообщение вида `✅ Опубликовано постов: X. Источников: Y.` или `📭 Новых материалов нет.`
+- **Права:** `contents: write` — для git commit/push
 
 ---
 
@@ -500,6 +542,28 @@ Fix HTML selector threshold for gov sites
 
 ---
 
+## Ключевые места в коде
+
+| Функциональность | Файл | Строки |
+|-----------------|------|--------|
+| Главный pipeline | monitor.py | 843–928 |
+| Вызовы Gemini API (генерация) | monitor.py | 179–204 |
+| Вызовы Gemini API (фильтрация) | monitor.py | 687–763 |
+| Скрапинг Telegram-каналов | monitor.py | 300–374 |
+| RSS-парсинг | monitor.py | 377–491 |
+| HTML-парсинг | monitor.py | 494–563 |
+| Keyword-фильтрация | monitor.py | 668–684 |
+| Ключевые слова (RELEVANCE_KEYWORDS) | monitor.py | 640–664 |
+| Извлечение постов (regex) | poster.py | 79–90 |
+| Конвертация Markdown → HTML | poster.py | 98–120 |
+| Отправка в Telegram | poster.py | 147–203 |
+| Команды бота (/run, /status) | trigger_bot.py | 143–165 |
+| GitHub Actions dispatch | trigger_bot.py | 91–135 |
+| Расписание workflow (cron) | monitor_and_post.yml | 4–7 |
+| Уведомление владельца | monitor_and_post.yml | 80–109 |
+
+---
+
 ## Что нельзя делать
 
 - Не коммить `.env` — только `.env.example`
@@ -511,4 +575,4 @@ Fix HTML selector threshold for gov sites
 
 ---
 
-*Последнее обновление: 2026-03-04 — Обновление документации по текущему состоянию кода*
+*Последнее обновление: 2026-03-11 — Исправлены неточности (счётчик CSS-селекторов, ссылки на строки кода), добавлены: секция GitHub Actions workflow, CSS-классы Telegram-скрапинга, точная регулярка poster.py, таблица ключевых мест в коде*

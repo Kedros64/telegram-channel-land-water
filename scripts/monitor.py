@@ -7,9 +7,10 @@ monitor.py — Мониторинг источников и генерация �
     python scripts/monitor.py
 
 Переменные окружения:
-    GEMINI_API_KEY — ключ API Google Gemini
+    DEEPSEEK_API_KEY — ключ API DeepSeek
 """
 
+import base64
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ import openpyxl
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import OpenAI
 
 # Некоторые госсайты используют самоподписанные или устаревшие сертификаты
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -42,15 +44,35 @@ REPO_ROOT = Path(__file__).parent.parent
 POSTS_DIR = REPO_ROOT / "posts"
 SOURCES_FILE = REPO_ROOT / "sources.xlsx"
 LAST_CHECK_FILE = POSTS_DIR / "last_check.txt"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_API_URL = (
-    "https://generativelanguage.googleapis.com/v1/models/"
-    "{model}:generateContent?key={key}"
-)
+ARTICLES_CACHE_FILE = POSTS_DIR / "articles_cache.json"
+ARTICLES_POOL_FILE  = POSTS_DIR / "articles_pool.json"   # Накопительный пул статей
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_API_BASE = "https://api.deepseek.com"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_IMAGE_MODEL = "gpt-image-1-mini"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
-MAX_POSTS_TO_GENERATE = 3     # Сколько постов генерировать за один запуск
+
+# Квоты постов за один сеанс публикации: 2 земельных + 1 водный
+LAND_POSTS_COUNT  = 2
+WATER_POSTS_COUNT = 1
+
+# Статьи старше этого числа дней удаляются из пула (если уже использованы)
+POOL_MAX_AGE_DAYS = 14
+
+# Ключевые слова для классификации статей по тематике
+WATER_CATEGORY_KEYWORDS = [
+    "водн", "гтс", "пруд", "водоём", "водоем",
+    "береговая полоса", "водоохранн", "водопользован",
+    "гидротехнич", "росводресурс",
+]
+LAND_CATEGORY_KEYWORDS = [
+    "земельн", "кадастр", "росреестр", "аренда земли",
+    "межеван", "сервитут", "лесфонд", "рослесхоз",
+    "роснедр", "недр", "росприроднадзор", "минприрод", "экологическ",
+]
 
 # Пути RSS-фидов для перебора (добавляются к базовому URL)
 RSS_CANDIDATE_PATHS = [
@@ -113,10 +135,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Промпты для Gemini API
+# Промпты для DeepSeek API
 # ---------------------------------------------------------------------------
 
-GEMINI_FILTER_PROMPT = """\
+DEEPSEEK_FILTER_PROMPT = """\
 Ты — редактор Telegram-канала о земельном и водном праве России.
 Вот пронумерованный список заголовков новостей с разных сайтов:
 
@@ -136,7 +158,7 @@ GEMINI_FILTER_PROMPT = """\
 Если подходящих новостей нет — верни: {{"relevant_ids": []}}
 """
 
-GEMINI_POST_PROMPT = """\
+DEEPSEEK_POST_PROMPT = """\
 Ты — редактор Telegram-канала о земельном и водном праве России.
 Канал читают предприниматели, фермеры, арендаторы, владельцы участков и водоёмов.
 Автор канала — консультант по оформлению водопользования, ГТС, прудов, земельных участков и лесфонда.
@@ -147,18 +169,25 @@ GEMINI_POST_PROMPT = """\
 ИСТОЧНИК: {source_name}
 ССЫЛКА: {url}
 
-Сформируй готовый пост для Telegram строго по структуре:
+Сформируй готовый пост для Telegram строго по структуре ниже.
 
 **ГОТОВЫЙ ПОСТ:**
-[Пост 800–1500 символов с пробелами. Структура:
-1. Цепляющая первая фраза (интрига, лёгкий юмор или провокация)
-2. Суть материала простым языком — что произошло и что это значит для читателя на практике
-3. Если упомянут нормативный акт — обязательно назови его
-4. Если материал про конкретный регион — упомяни
-5. Вывод с лёгкой иронией над бюрократией или ситуацией (не над людьми и организациями)
-6. Один CTA — выбери наиболее подходящий по тону из трёх ниже
+[Пост 800–1500 символов с пробелами.
 
-Тон: живой, немного хулиганский, без канцелярита, без хамства. Никаких юридических гарантий — только "как правило", "по практике", "есть риск что".]
+СТРУКТУРА:
+1. ЗАГОЛОВОК-ХУК — первая строка поста, выделена жирным (**жирный**). Одна короткая фраза или предложение, которое цепляет внимание и отражает суть. Никаких вводных слов перед ним.
+2. Суть материала простым языком — что произошло и что это значит для читателя на практике. Разбивай на абзацы. Если уместно — используй маркеры или нумерованный список.
+3. Если упомянут нормативный акт — обязательно назови его.
+4. Если материал про конкретный регион — упомяни.
+5. Вывод с лёгкой иронией над ситуацией или бюрократией — дружелюбной, «подмигивающей», не злой и не токсичной.
+6. Один CTA в конце.
+
+ОФОРМЛЕНИЕ:
+- Добавляй уместные смайлики по тексту для усиления эмоций и смысловых акцентов.
+- Важные мысли и ключевые фразы выделяй жирным (**жирный**). Жирного не больше 20–25% текста.
+- Ирония и самоирония приветствуются по всему тексту там, где уместно — лёгкие, неожиданные формулировки, без грубости и оскорблений.
+- Тон: живой, немного хулиганский, без канцелярита, без хамства.
+- Никаких юридических гарантий — только «как правило», «по практике», «есть риск что».]
 
 **ВАРИАНТЫ CTA:**
 Нейтральный: [вариант]
@@ -166,9 +195,9 @@ GEMINI_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [промпт для Midjourney/DALL-E, flat design или editorial cartoon, 16:9, no text in image, отражает суть метафорично, элементы российской действительности]
+Prompt (EN): [Photorealistic image, natural lighting, high detail, realistic colors, no text, no lettering, no captions. Описывай атмосферу и контекст поста. Если в кадре люди — только нейтральные собирательные образы, без реальных известных личностей.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [более простой промпт]
+Запасной вариант: [более простой промпт в том же фотореалистичном стиле, no text, no lettering]
 """
 
 # ---------------------------------------------------------------------------
@@ -176,32 +205,99 @@ Prompt (EN): [промпт для Midjourney/DALL-E, flat design или editoria
 # ---------------------------------------------------------------------------
 
 
-def gemini_generate(prompt: str) -> str:
+def deepseek_generate(prompt: str) -> str:
     """
-    Вызывает Gemini REST API напрямую через requests.
+    Вызывает DeepSeek API через openai-совместимый клиент.
     При ошибке 429 делает до 3 повторных попыток с задержкой 5/10/20 сек.
     """
-    url = GEMINI_API_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
-    }
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_API_BASE)
     delays = [5, 10, 20]
+    last_exc = None
     for attempt in range(1, len(delays) + 2):  # попытки 1..4
-        resp = requests.post(url, json=payload, timeout=60)
-        if resp.status_code == 429 and attempt <= len(delays):
-            wait = delays[attempt - 1]
-            log.warning(
-                "Gemini API: 429 Too Many Requests (попытка %d/4), жду %d сек…",
-                attempt, wait,
+        try:
+            response = client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2048,
             )
-            time.sleep(wait)
-            continue
+            return response.choices[0].message.content
+        except Exception as exc:
+            err_str = str(exc)
+            if "429" in err_str and attempt <= len(delays):
+                wait = delays[attempt - 1]
+                log.warning(
+                    "DeepSeek API: 429 Too Many Requests (попытка %d/4), жду %d сек…",
+                    attempt, wait,
+                )
+                time.sleep(wait)
+                last_exc = exc
+                continue
+            raise
+    raise RuntimeError(f"DeepSeek API: исчерпаны все попытки. Последняя ошибка: {last_exc}")
+
+
+def extract_image_prompt(post_text: str) -> str:
+    """
+    Извлекает английский промпт из секции **ВИЗУАЛ:** сгенерированного поста.
+    Возвращает строку или '' если секция отсутствует.
+    """
+    match = re.search(r"Prompt \(EN\):\s*(.+?)(?:\n|$)", post_text)
+    if match:
+        return match.group(1).strip().strip("[]")
+    return ""
+
+
+def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None:
+    """
+    Генерирует изображение через OpenAI Images API (gpt-image-1-mini).
+    Сохраняет PNG в posts/YYYY-MM-DD_HH_post_N.png.
+    При любой ошибке логирует предупреждение и возвращает None —
+    пост в любом случае будет опубликован, просто без картинки.
+    """
+    if not OPENAI_API_KEY:
+        log.debug("OPENAI_API_KEY не задан — генерация изображений пропущена")
+        return None
+
+    log.info("Генерирую изображение для поста %d…", post_num)
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENAI_IMAGE_MODEL,
+                "prompt": prompt[:1000],  # API limit
+                "size": "1024x1024",
+                "quality": "low",
+                "n": 1,
+            },
+            timeout=90,
+        )
         resp.raise_for_status()
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    # Последняя попытка уже выкинула исключение через raise_for_status
-    raise RuntimeError("Gemini API: исчерпаны все попытки")
+
+        b64_data = data["data"][0].get("b64_json")
+        if not b64_data:
+            log.warning("OpenAI Images API не вернул b64_json для поста %d", post_num)
+            return None
+
+        img_bytes = base64.b64decode(b64_data)
+        filename = now_msk.strftime("%Y-%m-%d_%H") + f"_post_{post_num}.png"
+        img_path = POSTS_DIR / filename
+        img_path.write_bytes(img_bytes)
+        log.info("Изображение сохранено: %s (%d KB)", filename, len(img_bytes) // 1024)
+        return img_path
+
+    except requests.exceptions.HTTPError as exc:
+        log.warning("OpenAI Images API HTTP-ошибка (пост %d): %s", post_num, exc)
+    except requests.exceptions.Timeout:
+        log.warning("OpenAI Images API: таймаут (пост %d)", post_num)
+    except Exception as exc:
+        log.warning("Не удалось сгенерировать изображение (пост %d): %s", post_num, exc)
+    return None
 
 
 def moscow_now() -> datetime:
@@ -612,13 +708,13 @@ def collect_all_articles(sources: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Фильтрация релевантных статей через Gemini API
+# Фильтрация релевантных статей через DeepSeek API
 # ---------------------------------------------------------------------------
 
 
 def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
     """
-    Извлекает список relevant_ids из ответа Gemini.
+    Извлекает список relevant_ids из ответа DeepSeek.
     Обрабатывает варианты: чистый JSON, JSON в ```-блоке, частично сломанный ответ.
     """
     # Убираем markdown-обёртку если есть
@@ -630,13 +726,13 @@ def _parse_relevant_ids(response_text: str, max_id: int) -> list[int]:
         # Оставляем только корректные числовые ID в допустимом диапазоне
         return [int(i) for i in ids if isinstance(i, (int, float)) and 1 <= int(i) <= max_id]
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        log.warning("Не удалось разобрать JSON от Gemini: %s | Ответ: %s", exc, clean[:200])
+        log.warning("Не удалось разобрать JSON от DeepSeek: %s | Ответ: %s", exc, clean[:200])
         return []
 
 
-FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к Gemini
+FILTER_BATCH_SIZE = 80  # Максимум заголовков в одном запросе к DeepSeek
 
-# Ключевые слова для пре-фильтрации (до Gemini) и fallback (если Gemini недоступен)
+# Ключевые слова для пре-фильтрации (до DeepSeek) и fallback (если DeepSeek недоступен)
 RELEVANCE_KEYWORDS = [
     "земельн",
     "водн",
@@ -668,7 +764,7 @@ STOP_WORDS = ["убийство", "теракт", "наркотики"]
 def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
     """
     Пре-фильтрация по ключевым словам.
-    Используется до отправки в Gemini (сокращает батч) и как fallback когда Gemini недоступен.
+    Используется до отправки в DeepSeek (сокращает батч) и как fallback когда DeepSeek недоступен.
     Статья проходит если содержит хотя бы одно ключевое слово в title+content (без учёта регистра)
     и не содержит жёстких стоп-слов.
     """
@@ -684,13 +780,172 @@ def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
     return result
 
 
-def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
+# ---------------------------------------------------------------------------
+# Пул статей: классификация, накопление, выбор для генерации
+# ---------------------------------------------------------------------------
+
+
+def classify_article(article: dict) -> str:
     """
-    Отправляет заголовки статей в Gemini для фильтрации.
+    Классифицирует статью как 'land', 'water' или 'both'.
+    Возвращает 'both' если содержит ключевые слова обеих тематик.
+    Fallback на 'land' если ни один водный ключ не найден.
+    """
+    text = (
+        (article.get("title") or "") + " " + (article.get("content") or "")
+    ).lower()
+    has_water = any(kw in text for kw in WATER_CATEGORY_KEYWORDS)
+    has_land  = any(kw in text for kw in LAND_CATEGORY_KEYWORDS)
+    if has_water and has_land:
+        return "both"
+    if has_water:
+        return "water"
+    return "land"  # по умолчанию — земельная тематика
+
+
+def load_articles_pool() -> list[dict]:
+    """Загружает накопительный пул статей из JSON-файла."""
+    if not ARTICLES_POOL_FILE.exists():
+        return []
+    try:
+        return json.loads(ARTICLES_POOL_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("Не удалось загрузить пул статей: %s", exc)
+        return []
+
+
+def save_articles_pool(pool: list[dict]) -> None:
+    """Сохраняет пул статей в JSON-файл."""
+    POSTS_DIR.mkdir(exist_ok=True)
+    ARTICLES_POOL_FILE.write_text(
+        json.dumps(pool, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def merge_into_pool(
+    pool: list[dict], new_articles: list[dict], now_msk: datetime
+) -> list[dict]:
+    """
+    Добавляет новые статьи в пул (дедупликация по URL).
+    Удаляет статьи, которые: уже использованы И старше POOL_MAX_AGE_DAYS дней.
+    Неиспользованные статьи хранятся пока не будут опубликованы.
+    """
+    existing_urls = {a.get("url", "") for a in pool}
+    added = 0
+    for article in new_articles:
+        url = article.get("url", "")
+        if not url or url in existing_urls:
+            continue
+        pool.append({
+            **article,
+            "collected_at": now_msk.isoformat(),
+            "category": classify_article(article),
+            "used": False,
+        })
+        existing_urls.add(url)
+        added += 1
+
+    # Очистка: удаляем использованные статьи старше POOL_MAX_AGE_DAYS
+    cutoff_str = (now_msk - timedelta(days=POOL_MAX_AGE_DAYS)).isoformat()
+    before = len(pool)
+    pool = [
+        a for a in pool
+        if not a.get("used") or a.get("collected_at", "") > cutoff_str
+    ]
+    purged = before - len(pool)
+
+    log.info(
+        "Пул: добавлено %d новых, удалено %d устаревших, итого %d статей (%d неиспользованных)",
+        added, purged, len(pool),
+        sum(1 for a in pool if not a.get("used")),
+    )
+    return pool
+
+
+def get_today_counts(pool: list[dict], today_str: str) -> tuple[int, int]:
+    """
+    Считает сколько земельных и водных постов уже выбрано/опубликовано сегодня.
+    Ориентируется на поле 'used_at' в пуле — ставится при выборе статьи для генерации.
+    """
+    land = water = 0
+    for a in pool:
+        used_at = a.get("used_at", "")
+        if not used_at or not used_at.startswith(today_str):
+            continue
+        cat = a.get("category", "land")
+        if cat == "water":
+            water += 1
+        else:  # land или both → засчитываем в земельные
+            land += 1
+    return land, water
+
+
+def select_one_post_from_pool(pool: list[dict], today_str: str) -> dict | None:
+    """
+    Выбирает ОДНУ статью для текущего сеанса на основе суточной квоты:
+      LAND_POSTS_COUNT земельных + WATER_POSTS_COUNT водных в день.
+
+    Стратегия: приоритет — водная статья (их меньше в пуле), затем земельная.
+    Если нужной категории нет → пробуем другую (не оставляем слот пустым).
+    Возвращает None если суточная квота выполнена или пул пуст.
+    """
+    land_today, water_today = get_today_counts(pool, today_str)
+    log.info(
+        "Суточная квота — земельных: %d/%d, водных: %d/%d",
+        land_today, LAND_POSTS_COUNT, water_today, WATER_POSTS_COUNT,
+    )
+
+    need_land  = land_today  < LAND_POSTS_COUNT
+    need_water = water_today < WATER_POSTS_COUNT
+
+    if not need_land and not need_water:
+        log.info("Суточная квота постов выполнена — в этот сеанс пост не нужен")
+        return None
+
+    # Неиспользованные статьи, от свежих к старым
+    unused = sorted(
+        [a for a in pool if not a.get("used")],
+        key=lambda a: a.get("collected_at", ""),
+        reverse=True,
+    )
+
+    if not unused:
+        log.warning("Пул статей пуст — нет материалов для поста")
+        return None
+
+    # Приоритет: сначала закрываем водный слот (он редкий)
+    if need_water:
+        for a in unused:
+            if a.get("category") in ("water", "both"):
+                log.info("Выбрана водная статья: %s", (a.get("title") or "")[:70])
+                return a
+        # Водных нет — используем земельную вместо (если земельный слот тоже нужен)
+        if need_land:
+            log.warning("Водных статей нет — берём земельную вместо водной")
+            for a in unused:
+                if a.get("category") in ("land", "both"):
+                    log.info("Выбрана земельная статья: %s", (a.get("title") or "")[:70])
+                    return a
+
+    # Земельный слот
+    if need_land:
+        for a in unused:
+            if a.get("category") in ("land", "both"):
+                log.info("Выбрана земельная статья: %s", (a.get("title") or "")[:70])
+                return a
+
+    log.warning("Подходящих статей в пуле не найдено")
+    return None
+
+
+def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
+    """
+    Отправляет заголовки статей в DeepSeek для фильтрации.
     Если заголовков > FILTER_BATCH_SIZE — разбивает на батчи по 80 штук,
     обрабатывает последовательно с паузой 2 сек между батчами.
-    При недоступности Gemini API — fallback на keyword-фильтрацию.
-    Возвращает отфильтрованный список статей (максимум MAX_POSTS_TO_GENERATE).
+    При недоступности DeepSeek API — fallback на keyword-фильтрацию.
+    Возвращает все найденные релевантные статьи (без ограничения количества).
+    Ограничение по количеству постов накладывается позже при выборе из пула.
     """
     if not articles:
         return []
@@ -702,12 +957,12 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
     ]
     total_batches = len(batches)
     log.info(
-        "Отправляю %d заголовков в Gemini для фильтрации (батчей: %d)…",
+        "Отправляю %d заголовков в DeepSeek для фильтрации (батчей: %d)…",
         len(articles), total_batches,
     )
 
     all_relevant: list[dict] = []
-    gemini_failed_batches = 0
+    deepseek_failed_batches = 0
 
     for batch_num, batch in enumerate(batches, start=1):
         # Нумерация внутри батча начинается с 1 — IDs локальные
@@ -718,16 +973,16 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
             headlines_lines.append(f"{idx}. [{source}] {title}")
 
         headlines_list = "\n".join(headlines_lines)
-        prompt = GEMINI_FILTER_PROMPT.format(headlines_list=headlines_list)
+        prompt = DEEPSEEK_FILTER_PROMPT.format(headlines_list=headlines_list)
 
         log.info("Батч %d/%d: %d заголовков", batch_num, total_batches, len(batch))
 
         try:
-            response_text = gemini_generate(prompt)
-            log.debug("Ответ Gemini (батч %d): %s", batch_num, response_text[:300])
+            response_text = deepseek_generate(prompt)
+            log.debug("Ответ DeepSeek (батч %d): %s", batch_num, response_text[:300])
         except Exception as exc:
-            log.error("Ошибка Gemini API при фильтрации батча %d: %s", batch_num, exc)
-            gemini_failed_batches += 1
+            log.error("Ошибка DeepSeek API при фильтрации батча %d: %s", batch_num, exc)
+            deepseek_failed_batches += 1
             if batch_num < total_batches:
                 time.sleep(2)
             continue
@@ -744,33 +999,33 @@ def filter_relevant_with_gemini(articles: list[dict]) -> list[dict]:
         if batch_num < total_batches:
             time.sleep(2)
 
-    # Если Gemini не ответил ни на один батч — используем keyword-fallback
-    if gemini_failed_batches == total_batches:
+    # Если DeepSeek не ответил ни на один батч — используем keyword-fallback
+    if deepseek_failed_batches == total_batches:
         log.warning(
-            "Gemini API недоступен (все %d батчей упали) — "
+            "DeepSeek API недоступен (все %d батчей упали) — "
             "переключаюсь на keyword-фильтрацию",
             total_batches,
         )
         fallback = pre_filter_by_keywords(articles)
         log.info("Keyword-fallback: %d релевантных из %d", len(fallback), len(articles))
-        return fallback[:MAX_POSTS_TO_GENERATE]
+        return fallback
 
     if not all_relevant:
-        log.info("Gemini не нашёл релевантных новостей")
+        log.info("DeepSeek не нашёл релевантных новостей")
         return []
 
     log.info("Итого релевантных: %d из %d", len(all_relevant), len(articles))
-    return all_relevant[:MAX_POSTS_TO_GENERATE]
+    return all_relevant
 
 
 # ---------------------------------------------------------------------------
-# Генерация постов через Gemini API
+# Генерация постов через DeepSeek API
 # ---------------------------------------------------------------------------
 
 
 def generate_post(article: dict) -> str:
-    """Генерирует готовый пост через Google Gemini REST API."""
-    prompt = GEMINI_POST_PROMPT.format(
+    """Генерирует готовый пост через DeepSeek API."""
+    prompt = DEEPSEEK_POST_PROMPT.format(
         title=article.get("title", "Без заголовка"),
         content=(article.get("content") or "")[:2000],
         source_name=article.get("source_name", ""),
@@ -778,7 +1033,7 @@ def generate_post(article: dict) -> str:
     )
 
     log.info("Генерирую пост: «%s»", (article.get("title") or "")[:70])
-    return gemini_generate(prompt)
+    return deepseek_generate(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -809,7 +1064,7 @@ def build_output(
         )
         return "\n".join(lines)
 
-    for i, (article, post_text) in enumerate(articles_with_posts, start=1):
+    for i, (article, post_text, image_path) in enumerate(articles_with_posts, start=1):
         lines += [
             "---",
             "",
@@ -817,6 +1072,10 @@ def build_output(
             "",
             f"**Источник:** {article.get('source_name', '')} — {article.get('url', '')}",
             f"**Суть:** {article.get('title', '')}",
+        ]
+        if image_path:
+            lines.append(f"**ИЗОБРАЖЕНИЕ:** {image_path.name}")
+        lines += [
             "",
             post_text.strip(),
             "",
@@ -852,15 +1111,15 @@ def main() -> None:
     log.info("Текущее время (МСК): %s", now_msk.strftime("%Y-%m-%d %H:%M"))
     log.info("Последняя проверка:  %s", last_check.isoformat())
 
-    # 1. Проверяем наличие Gemini API ключа сразу — он нужен для обоих шагов
-    if not GEMINI_API_KEY:
+    # 1. Проверяем наличие DeepSeek API ключа сразу — он нужен для обоих шагов
+    if not DEEPSEEK_API_KEY:
         log.error(
-            "GEMINI_API_KEY не установлен. "
+            "DEEPSEEK_API_KEY не установлен. "
             "Добавьте ключ в .env или GitHub Secrets."
         )
         sys.exit(1)
 
-    log.info("Используется модель: %s", GEMINI_MODEL)
+    log.info("Используется модель: %s", DEEPSEEK_MODEL)
 
     # 2. Читаем источники
     sources = read_sources()
@@ -893,24 +1152,67 @@ def main() -> None:
         save_last_check(now_utc)
         return
 
-    # 5. Финальная фильтрация через Gemini (работает только с уже отфильтрованным пулом)
-    relevant = filter_relevant_with_gemini(prefiltered)
+    # Сохраняем кэш для regen.py — повторная генерация без парсинга источников
+    try:
+        POSTS_DIR.mkdir(exist_ok=True)
+        ARTICLES_CACHE_FILE.write_text(
+            json.dumps(prefiltered, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        log.info("Кэш статей сохранён: %d записей → %s", len(prefiltered), ARTICLES_CACHE_FILE.name)
+    except Exception as exc:
+        log.warning("Не удалось сохранить кэш статей: %s", exc)
 
-    if not relevant:
-        log.info("Релевантных материалов не найдено по оценке Gemini")
+    # 5. Финальная фильтрация через DeepSeek — возвращает все релевантные (без лимита)
+    relevant = filter_relevant_with_deepseek(prefiltered)
+
+    # 6. Обновляем накопительный пул статей
+    #    - Добавляем новые релевантные статьи (дедупликация по URL)
+    #    - Удаляем устаревшие использованные записи
+    pool = load_articles_pool()
+    pool = merge_into_pool(pool, relevant, now_msk)
+
+    # 7. Выбираем 1 статью для текущего сеанса на основе суточной квоты
+    #    (2 земельных + 1 водный в день; если нужной категории нет — берём из пула прошлых запусков)
+    today_str = now_msk.strftime("%Y-%m-%d")
+    selected = select_one_post_from_pool(pool, today_str)
+
+    if selected is None:
+        # Квота выполнена или пул пуст — сохраняем пул с новыми статьями, пост не генерируем
+        save_articles_pool(pool)
         content = build_output([], now_msk, len(sources))
         save_output(content, now_msk)
         save_last_check(now_utc)
         return
 
-    # 6. Генерируем посты для релевантных статей
+    # Отмечаем выбранную статью как использованную с временной меткой
+    for a in pool:
+        if a.get("url") == selected["url"]:
+            a["used"]    = True
+            a["used_at"] = now_msk.isoformat()
+    save_articles_pool(pool)
+
+    to_generate = [selected]
+
+    # 8. Генерируем пост для выбранной статьи
     articles_with_posts: list[tuple] = []
 
-    for article in relevant:
+    for article in to_generate:
         try:
             post_text = generate_post(article)
-            articles_with_posts.append((article, post_text))
-            time.sleep(2)  # Пауза между вызовами Gemini API
+
+            # Генерируем изображение если задан OPENAI_API_KEY
+            image_path = None
+            if OPENAI_API_KEY:
+                img_prompt = extract_image_prompt(post_text)
+                if img_prompt:
+                    image_path = generate_image(
+                        img_prompt, now_msk, len(articles_with_posts) + 1
+                    )
+                else:
+                    log.debug("Промпт для изображения не найден в посте — пропускаю генерацию")
+
+            articles_with_posts.append((article, post_text, image_path))
+            time.sleep(2)  # Пауза между вызовами DeepSeek API
         except Exception as exc:
             log.error(
                 "Ошибка генерации поста для «%s»: %s",
@@ -918,7 +1220,7 @@ def main() -> None:
                 exc,
             )
 
-    # 6. Сохраняем результат
+    # 9. Сохраняем результат
     content = build_output(articles_with_posts, now_msk, len(sources))
     save_output(content, now_msk)
     save_last_check(now_utc)
