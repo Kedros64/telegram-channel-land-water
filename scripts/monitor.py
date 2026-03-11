@@ -51,7 +51,7 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_IMAGE_MODEL = "gpt-image-1-mini"
+OPENAI_IMAGE_MODEL = "dall-e-3"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 
@@ -271,7 +271,8 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
                 "model": OPENAI_IMAGE_MODEL,
                 "prompt": prompt[:1000],  # API limit
                 "size": "1024x1024",
-                "quality": "low",
+                "quality": "standard",
+                "response_format": "b64_json",
                 "n": 1,
             },
             timeout=90,
