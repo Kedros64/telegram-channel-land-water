@@ -50,10 +50,20 @@ scripts/poster.py
 Telegram Bot API → Telegram-канал
 ```
 
-Автоматизация запускается через **GitHub Actions** трижды в день:
+Автоматизация запускается через **GitHub Actions** (`monitor_and_post.yml`) трижды в день:
 - 09:00 МСК (06:00 UTC) — `cron: '0 6 * * *'`
 - 14:00 МСК (11:00 UTC) — `cron: '0 11 * * *'`
 - 19:00 МСК (16:00 UTC) — `cron: '0 16 * * *'`
+
+**Шаги workflow (в порядке выполнения):**
+1. Checkout репозитория (`actions/checkout@v4`, `fetch-depth: 0`)
+2. Setup Python 3.11 с кешированием pip
+3. Install dependencies (`pip install -r requirements.txt`)
+4. Run monitor (`python scripts/monitor.py`) — генерирует `posts/ГГГГ-ММ-ДД_ЧЧ.md`
+5. Commit generated posts — `git commit "Auto: posts YYYY-MM-DD HH:MM UTC"`, rebase, push
+6. Post to Telegram (`python scripts/poster.py`) — публикует посты в канал
+7. Commit post results — `git commit "Auto: mark posted YYYY-MM-DD HH:MM UTC"`, rebase, push
+8. Notify owner — Python-скрипт отправляет Telegram-сообщение с итогами (кол-во источников, релевантных материалов)
 
 ---
 
@@ -74,8 +84,8 @@ telegram-channel-land-water/
 │   ├── posted.log                         # Лог опубликованных (не в git)
 │   └── errors.log                         # Лог ошибок публикации (не в git)
 └── scripts/
-│   ├── monitor.py                         # Мониторинг + генерация постов (~930 строк)
-│   ├── poster.py                          # Публикация в Telegram (~340 строк)
+│   ├── monitor.py                         # Мониторинг + генерация постов (933 строки)
+│   ├── poster.py                          # Публикация в Telegram (340 строк)
 │   └── trigger_bot.py                     # Бот для ручного запуска через Telegram
 └── .github/
     └── workflows/
@@ -94,7 +104,7 @@ telegram-channel-land-water/
 1. Читает `sources.xlsx`, фильтрует строки с `active` ∈ {да, yes, 1, true}
 2. Для каждого источника:
    - **`type = telegram`** — скрапит публичный веб-вид канала через `https://t.me/s/{channel}` (BeautifulSoup, без MTProto)
-   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 20 CSS-селекторами
+   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 25 CSS-селекторами
 3. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
 4. **Keyword pre-filter** (`pre_filter_by_keywords`): отсекает статьи без ключевых слов и со стоп-словами
 5. **Gemini API filter** (`filter_relevant_with_gemini`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
@@ -122,8 +132,8 @@ telegram-channel-land-water/
 **RSS-детекция:**
 Пробуемые пути (к домену источника): `/rss`, `/rss.xml`, `/feed`, `/feed.xml`, `/atom.xml`, `/news/rss`, `/news/feed`, `/export/rss`, `/lenta/rss`. Поддерживает RSS 2.0 и Atom.
 
-**CSS-селекторы для HTML-парсинга:**
-`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`
+**CSS-селекторы для HTML-парсинга (25 штук):**
+`article`, `.news-item`, `.article-item`, `.news__item`, `.b-news-item`, `.post-item`, `.material-item`, `.entry`, `.list-item`, `.item`, `.card`, `.news-card`, `.publication`, `.doc-item`, `li.item`, `li.news`, `li.article`, `.pressrelease`, `.press-release`, `.news-list__item`, `.articles-list__item`, и дополнительные специфичные для российских госсайтов и правовых порталов.
 
 Если ни один селектор не даёт ≥ 3 блоков — fallback на `h2/h3/h4` с дочерними ссылками.
 
@@ -136,7 +146,8 @@ telegram-channel-land-water/
 **Алгоритм:**
 1. Сканирует `posts/*.md` — берёт файлы без суффикса `_posted` и не в `posted.log`
 2. Файлы с «релевантных материалов не найдено» без блока `ГОТОВЫЙ ПОСТ` — помечает обработанными без публикации
-3. Извлекает блоки `**ГОТОВЫЙ ПОСТ:**` регуляркой (шаблон до `**ВАРИАНТЫ CTA` или `---` или `## Пост`)
+3. Извлекает блоки `**ГОТОВЫЙ ПОСТ:**` регуляркой:
+   `r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n---|\n## Пост\s|\Z)"` (шаблон до `**ВАРИАНТЫ CTA` или `---` или `## Пост`)
 4. Конвертирует Markdown → HTML: `[text](url)` → `<a>`, `**` → `<b>`, `*` → `<i>`, `` ` `` → `<code>`
 5. Обрезает до `TELEGRAM_MAX_LENGTH = 4096` символов; удаляет управляющие символы
 6. Отправляет каждый пост через `sendMessage` (parse_mode=HTML)
@@ -311,8 +322,10 @@ Fallback на keyword-filter если Gemini упал на всех батчах
 2. Нажми **Run workflow → Run workflow**
 3. Наблюдай за логами — должны пройти шаги:
    - `Run monitor` — появится файл `posts/ГГГГ-ММ-ДД_ЧЧ.md`
+   - `Commit generated posts` — файл сохраняется в репозиторий
    - `Post to Telegram` — посты появятся в канале
    - `Commit post results` — в репозитории файл переименуется в `_posted.md`
+   - `Notify owner` — владелец канала получит Telegram-сообщение с итогами запуска
 
 ### Шаг 7: Локальное тестирование
 
@@ -378,9 +391,10 @@ python scripts/trigger_bot.py
 ### Как работает
 
 1. Бот получает команду `/run` только от `OWNER_CHAT_ID` — чужие сообщения игнорируются
-2. Вызывает GitHub API (`POST /repos/.../actions/workflows/monitor_and_post.yml/dispatches`)
+2. Вызывает GitHub API (`POST /repos/.../actions/workflows/monitor_and_post.yml/dispatches`) используя Bearer-токен `GH_PAT`
 3. GitHub Actions запускает тот же workflow, что и по расписанию
 4. Посты появляются в канале через 2–3 минуты, результаты коммитятся в git
+5. По завершении workflow владелец получает Telegram-уведомление со статистикой запуска
 
 ### Переменные окружения для trigger_bot.py
 
@@ -511,4 +525,4 @@ Fix HTML selector threshold for gov sites
 
 ---
 
-*Последнее обновление: 2026-03-04 — Обновление документации по текущему состоянию кода*
+*Последнее обновление: 2026-03-11 — Уточнение счётчиков (monitor.py 933 строки, 25 CSS-селекторов), документирование шагов workflow и regex poster.py*
