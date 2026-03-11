@@ -109,9 +109,9 @@ telegram-channel-land-water/
    - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 30+ CSS-селекторами
 3. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
 4. **Keyword pre-filter** (`pre_filter_by_keywords`): отсекает статьи без ключевых слов и со стоп-словами
-5. **Gemini API filter** (`filter_relevant_with_gemini`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
-6. Если Gemini недоступен на всех батчах — fallback на keyword-фильтрацию
-7. Генерирует пост через Gemini для каждого из топ-3 релевантных материалов (пауза 2 сек между генерациями)
+5. **DeepSeek API filter** (`filter_relevant_with_deepseek`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
+6. Если DeepSeek недоступен на всех батчах — fallback на keyword-фильтрацию
+7. Генерирует пост через DeepSeek для каждого из топ-3 релевантных материалов (пауза 2 сек между генерациями)
 8. Сохраняет результат в `posts/ГГГГ-ММ-ДД_ЧЧ.md`
 9. Обновляет `posts/last_check.txt`
 
@@ -128,9 +128,9 @@ telegram-channel-land-water/
 **Особенности:**
 - SSL-предупреждения подавлены (`urllib3.disable_warnings`) — многие госсайты имеют самоподписанные сертификаты
 - Пауза 1 сек между запросами к сайтам (вежливый краулер)
-- Пауза 2 сек между батчами Gemini фильтрации
+- Пауза 2 сек между батчами DeepSeek фильтрации
 - Пауза 2 сек между генерациями постов
-- При ошибке 429 от Gemini — до 3 повторов с задержкой 5/10/20 сек
+- При ошибке 429 от DeepSeek — до 3 повторов с задержкой 5/10/20 сек
 - User-Agent имитирует Chrome — снижает риск блокировки
 
 **RSS-детекция:**
@@ -233,9 +233,9 @@ r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n---|
 **Ступень 1 — Keyword pre-filter** (быстро, без API):
 Статья проходит если в `title + content` есть хотя бы одно включающее слово **и** нет стоп-слова.
 
-**Ступень 2 — Gemini semantic filter** (семантически, через API):
-Прошедшие keyword-filter отправляются в Gemini батчами. Gemini возвращает JSON: `{"relevant_ids": [1, 3, 5]}`.
-Fallback на keyword-filter если Gemini упал на всех батчах.
+**Ступень 2 — DeepSeek semantic filter** (семантически, через API):
+Прошедшие keyword-filter отправляются в DeepSeek батчами. DeepSeek возвращает JSON: `{"relevant_ids": [1, 3, 5]}`.
+Fallback на keyword-filter если DeepSeek упал на всех батчах.
 
 ### Включающие ключевые слова (RELEVANCE_KEYWORDS в коде)
 
@@ -330,18 +330,18 @@ CSS-классы для парсинга Telegram веб-вида:
 - **Публичный канал:** CHANNEL_ID = `@username_канала` (например, `@my_land_channel`)
 - **Приватный канал:** перешли любое сообщение из канала боту [@userinfobot](https://t.me/userinfobot) — он покажет числовой ID в формате `-1001234567890`
 
-### Шаг 4: Получить Google Gemini API Key
+### Шаг 4: Получить DeepSeek API Key
 
-1. Перейди на [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
-2. Нажми **Create API Key**
-3. Скопируй ключ (начинается с `AIza...`)
+1. Перейди на [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)
+2. Нажми **Create new API key**
+3. Скопируй ключ (начинается с `sk-...`)
 
 ### Шаг 5: Добавить секреты в GitHub
 
 1. Открой репозиторий на GitHub
 2. Перейди в **Settings → Secrets and variables → Actions**
 3. Нажми **New repository secret** и добавь по одному:
-   - `GEMINI_API_KEY` — ключ от Google Gemini
+   - `DEEPSEEK_API_KEY` — ключ DeepSeek API
    - `BOT_TOKEN` — токен Telegram-бота
    - `CHANNEL_ID` — ID или @username канала
 
@@ -493,9 +493,9 @@ python scripts/trigger_bot.py
 
 2. **Keyword pre-filter слишком строг** — собранные статьи не содержат слов из RELEVANCE_KEYWORDS в заголовках/анонсах. В логах: `Пре-фильтрация по ключевым словам: N -> 0 статей`.
 
-3. **Gemini API возвращает пустой список** — Gemini решил, что ни одна статья не релевантна. В логах: `Батч 1/1: выбрано 0 релевантных`.
+3. **DeepSeek API возвращает пустой список** — DeepSeek решил, что ни одна статья не релевантна. В логах: `Батч 1/1: выбрано 0 релевантных`.
 
-4. **GEMINI_API_KEY не настроен** — скрипт завершится с ошибкой в самом начале.
+4. **DEEPSEEK_API_KEY не настроен** — скрипт завершится с ошибкой в самом начале.
 
 ### Как диагностировать
 
@@ -503,7 +503,7 @@ python scripts/trigger_bot.py
 ```
 Всего собрано статей со всех источников: N     ← если 0, проблема в парсинге сайтов
 Пре-фильтрация по ключевым словам: N -> M      ← если M=0, проблема в keywords
-Батч 1/1: выбрано M релевантных                ← если M=0, Gemini не нашёл релевантных
+Батч 1/1: выбрано M релевантных                ← если M=0, DeepSeek не нашёл релевантных
 ```
 
 ### Типичные исправления
@@ -514,7 +514,7 @@ python scripts/trigger_bot.py
 | Источник использует JavaScript | Перейти на RSS-версию сайта (поискать `/rss` или `/feed`) |
 | Keyword-filter отсекает всё | Добавить ключевые слова в `RELEVANCE_KEYWORDS` в `monitor.py` |
 | Источник заблокировал бота | Сменить URL на зеркало или убрать источник из sources.xlsx |
-| Gemini игнорирует статьи | Скорректировать `GEMINI_FILTER_PROMPT` или расширить список тем |
+| DeepSeek игнорирует статьи | Скорректировать `DEEPSEEK_FILTER_PROMPT` или расширить список тем |
 
 ---
 
@@ -543,7 +543,7 @@ Fix HTML selector threshold for gov sites
 
 | Переменная       | Где используется   | Описание                                                |
 |------------------|--------------------|---------------------------------------------------------|
-| `GEMINI_API_KEY` | `monitor.py`       | Ключ Google Gemini API для генерации постов             |
+| `DEEPSEEK_API_KEY` | `monitor.py`       | Ключ DeepSeek API для генерации постов             |
 | `BOT_TOKEN`      | `poster.py`, `trigger_bot.py` | Токен Telegram-бота от @BotFather          |
 | `CHANNEL_ID`     | `poster.py`        | ID или @username Telegram-канала                        |
 | `OWNER_CHAT_ID`  | `trigger_bot.py`   | Числовой Telegram ID владельца (для ручного запуска)   |
@@ -583,8 +583,8 @@ Fix HTML selector threshold for gov sites
 | Функциональность | Файл | Строки |
 |-----------------|------|--------|
 | Главный pipeline | monitor.py | 843–928 |
-| Вызовы Gemini API (генерация) | monitor.py | 179–204 |
-| Вызовы Gemini API (фильтрация) | monitor.py | 687–763 |
+| Вызовы DeepSeek API (генерация) | monitor.py | 179–204 |
+| Вызовы DeepSeek API (фильтрация) | monitor.py | 687–763 |
 | Скрапинг Telegram-каналов | monitor.py | 300–374 |
 | RSS-парсинг | monitor.py | 377–491 |
 | HTML-парсинг | monitor.py | 494–563 |

@@ -442,11 +442,11 @@ def validate_url(url: str, session: requests.Session | None = None) -> bool:
         return False
     try:
         s = session or requests.Session()
-        resp = s.head(url, timeout=10, verify=False, allow_redirects=True)
+        resp = s.head(url, timeout=5, verify=False, allow_redirects=True)
         if resp.ok:
             return True
         # Некоторые серверы не поддерживают HEAD — пробуем GET
-        resp = s.get(url, timeout=10, verify=False, stream=True)
+        resp = s.get(url, timeout=5, verify=False, stream=True)
         return resp.ok
     except Exception:
         return False
@@ -1021,14 +1021,14 @@ def _sort_by_priority(articles: list[dict]) -> list[dict]:
     """
     Сортирует статьи по приоритету:
     1. Федеральные (не региональные) — выше
-    2. Свежие — выше
+    2. Свежие — выше (collected_at desc)
+    Двухпроходная стабильная сортировка: сначала по дате desc, затем по региональности asc.
     """
-    def sort_key(a: dict) -> tuple:
-        regional = is_regional(a)
-        collected = a.get("collected_at", "")
-        return (regional, collected)  # False < True → федеральные первыми; потом по дате desc
-
-    return sorted(articles, key=sort_key)
+    # Проход 1: свежие первыми
+    result = sorted(articles, key=lambda a: a.get("collected_at", ""), reverse=True)
+    # Проход 2: федеральные (regional=False) первыми, региональные — в конце
+    result = sorted(result, key=lambda a: is_regional(a))
+    return result
 
 
 def select_posts_from_pool(
@@ -1043,8 +1043,9 @@ def select_posts_from_pool(
     remaining = MAX_REGULAR_POSTS_PER_DAY - used_today
     log.info("Сегодня использовано: %d/%d постов", used_today, MAX_REGULAR_POSTS_PER_DAY)
 
-    if remaining <= 0 and count <= MAX_REGULAR_POSTS_PER_DAY:
-        # Для саммари (count=5) лимит не применяется — он отдельный
+    if remaining <= 0 and count == 1:
+        # Лимит применяется только к обычным постам (count=1).
+        # Вечерний саммари (count=SUMMARY_POST_ARTICLES) выходит независимо от лимита.
         log.info("Суточный лимит обычных постов исчерпан")
         return []
 
