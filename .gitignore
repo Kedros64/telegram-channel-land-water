@@ -7,7 +7,7 @@ posts/errors.log
 
 # Кэш статей — пересоздаётся при каждом запуске, не нужен в git
 posts/articles_cache.json
-posts/articles_pool.json
+# articles_pool.json — НЕ игнорируем, он нужен для хранения состояния между запусками
 
 # Python
 __pycache__/
