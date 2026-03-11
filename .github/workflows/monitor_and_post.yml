@@ -42,14 +42,16 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Убираем кэш-файлы из трекинга если они туда попали
-          git rm --cached posts/articles_cache.json posts/articles_pool.json 2>/dev/null || true
-          git add posts/ -- ':!posts/*.json'
+          # articles_cache.json — временный кэш, не нужен в git
+          git rm --cached posts/articles_cache.json 2>/dev/null || true
+          # articles_pool.json коммитим — это состояние системы между запусками
+          git add posts/ -- ':!posts/articles_cache.json'
           if git diff --staged --quiet; then
             echo "Новых файлов нет — коммит не нужен"
           else
             git commit -m "Auto: posts $(date +'%Y-%m-%d %H:%M UTC')"
-            git pull --rebase --autostash
+            # -X theirs: при rebase-конфликте предпочитаем наши локальные изменения
+            git pull --rebase --autostash -X theirs
             git push
           fi
 
@@ -66,8 +68,8 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           # Подтягиваем возможные изменения от предыдущего шага
-          git pull --rebase --autostash
-          git add posts/ -- ':!posts/*.json'
+          git pull --rebase --autostash -X theirs
+          git add posts/ -- ':!posts/articles_cache.json'
           if git diff --staged --quiet; then
             echo "Новых изменений после постинга нет"
           else
