@@ -5,6 +5,10 @@
 posts/posted.log
 posts/errors.log
 
+# Кэш статей — пересоздаётся при каждом запуске, не нужен в git
+posts/articles_cache.json
+posts/articles_pool.json
+
 # Python
 __pycache__/
 *.py[cod]

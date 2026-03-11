@@ -42,7 +42,9 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add posts/
+          # Убираем кэш-файлы из трекинга если они туда попали
+          git rm --cached posts/articles_cache.json posts/articles_pool.json 2>/dev/null || true
+          git add posts/ -- ':!posts/*.json'
           if git diff --staged --quiet; then
             echo "Новых файлов нет — коммит не нужен"
           else
@@ -65,7 +67,7 @@ jobs:
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           # Подтягиваем возможные изменения от предыдущего шага
           git pull --rebase --autostash
-          git add posts/
+          git add posts/ -- ':!posts/*.json'
           if git diff --staged --quiet; then
             echo "Новых изменений после постинга нет"
           else
