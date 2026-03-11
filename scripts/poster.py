@@ -10,6 +10,7 @@ poster.py — Публикация постов из posts/*.md в Telegram-ка
     CHANNEL_ID — ID или @username канала (например: @my_channel или -1001234567890)
 """
 
+import argparse
 import logging
 import os
 import re
@@ -35,8 +36,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
-PAUSE_BETWEEN_POSTS = 30   # секунды между постами из одного файла
+PAUSE_BETWEEN_POSTS = 30    # секунды между постами из одного файла
 TELEGRAM_MAX_LENGTH = 4096  # максимум символов в одном сообщении Telegram
+TELEGRAM_CAPTION_MAX = 1024  # максимум символов в подписи к фото
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,18 +78,35 @@ def log_error(filename: str, error: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def extract_posts(content: str) -> list[str]:
+def extract_posts(content: str) -> list[tuple[str, str | None]]:
     """
     Извлекает все блоки «ГОТОВЫЙ ПОСТ:» из markdown-файла.
-    Возвращает список текстов постов (без заголовка блока).
+    Возвращает список кортежей (текст_поста, имя_файла_изображения_или_None).
     """
-    # Ищем всё между **ГОТОВЫЙ ПОСТ:** и следующим разделителем
-    pattern = re.compile(
-        r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n---|\n## Пост\s|\Z)",
+    # Разбиваем на блоки по разделителю "## Пост N"
+    # Каждый блок содержит метаданные поста + текст + опциональное **ИЗОБРАЖЕНИЕ:**
+    post_pattern = re.compile(
+        r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n\*\*ВИЗУАЛ:|\n\*\*CTA|\n---|\n## Пост\s|\Z)",
         re.DOTALL,
     )
-    posts = [m.group(1).strip() for m in pattern.finditer(content)]
-    return [p for p in posts if p]
+    image_pattern = re.compile(r"\*\*ИЗОБРАЖЕНИЕ:\*\*\s*(\S+\.png)")
+
+    # Разбиваем на секции "## Пост N" чтобы матчить изображение к нужному посту
+    sections = re.split(r"\n---\n\n## Пост \d+\n", content)
+
+    results = []
+    for section in sections:
+        post_match = post_pattern.search(section)
+        if not post_match:
+            continue
+        post_text = post_match.group(1).strip()
+        if not post_text:
+            continue
+        img_match = image_pattern.search(section)
+        image_filename = img_match.group(1).strip() if img_match else None
+        results.append((post_text, image_filename))
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +163,12 @@ def sanitize_for_telegram(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def send_message(text: str) -> bool:
+def send_message(text: str, dry_run: bool = False) -> bool:
     """
     Отправляет сообщение в Telegram-канал через Bot API.
     Сначала пробует с HTML-разметкой; при ошибке разбора — без разметки.
-    Возвращает True при успехе.
+    В режиме dry_run показывает, что будет отправлено, без реальной отправки.
+    Возвращает True при успехе (или при dry_run).
     """
     api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendMessage"
     html_text = markdown_to_html(sanitize_for_telegram(text))
@@ -159,6 +179,17 @@ def send_message(text: str) -> bool:
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
+
+    if dry_run:
+        log.info("=== DRY RUN — пост НЕ отправлен ===")
+        log.info("chat_id: %s", CHANNEL_ID)
+        log.info("parse_mode: HTML")
+        log.info("disable_web_page_preview: False")
+        log.info("Длина текста: %d символов", len(html_text))
+        log.info("--- Текст поста (HTML) ---")
+        print(html_text)
+        log.info("--- Конец поста ---")
+        return True
 
     try:
         resp = requests.post(api_url, json=payload, timeout=30)
@@ -203,14 +234,55 @@ def send_message(text: str) -> bool:
         return False
 
 
+def send_photo(image_path: Path, dry_run: bool = False) -> bool:
+    """
+    Отправляет фото без подписи в Telegram-канал через sendPhoto.
+    Текст поста отправляется отдельным сообщением после фото — это
+    обходит лимит caption (1024 символа) и позволяет публиковать
+    полный текст любой длины.
+    Возвращает False при ошибке — тогда публикуется только текст.
+    """
+    api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendPhoto"
+
+    if dry_run:
+        log.info("=== DRY RUN — фото НЕ отправлено: %s ===", image_path.name)
+        return True
+
+    try:
+        with open(image_path, "rb") as f:
+            resp = requests.post(
+                api_url,
+                data={"chat_id": CHANNEL_ID},
+                files={"photo": (image_path.name, f, "image/png")},
+                timeout=60,
+            )
+        data = resp.json()
+
+        if data.get("ok"):
+            msg_id = data.get("result", {}).get("message_id", "?")
+            log.info("✓ Фото отправлено (message_id=%s)", msg_id)
+            return True
+
+        log.warning(
+            "Telegram sendPhoto вернул ошибку: %s — публикую только текст",
+            data.get("description", "?"),
+        )
+        return False
+
+    except Exception as exc:
+        log.warning("Ошибка при отправке фото (%s): %s — публикую только текст", image_path.name, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Обработка файлов
 # ---------------------------------------------------------------------------
 
 
-def process_file(post_file: Path) -> bool:
+def process_file(post_file: Path, dry_run: bool = False) -> bool:
     """
     Обрабатывает один файл: извлекает посты и отправляет в Telegram.
+    В режиме dry_run показывает посты без реальной отправки.
     Возвращает True, если все посты успешно отправлены (или файл пуст).
     """
     log.info("Обрабатываю файл: %s", post_file.name)
@@ -240,13 +312,23 @@ def process_file(post_file: Path) -> bool:
     log.info("Найдено постов для отправки: %d", len(posts))
     all_sent = True
 
-    for i, post_text in enumerate(posts):
-        if i > 0:
+    for i, (post_text, image_filename) in enumerate(posts):
+        if i > 0 and not dry_run:
             log.info("Пауза %d сек перед следующим постом...", PAUSE_BETWEEN_POSTS)
             time.sleep(PAUSE_BETWEEN_POSTS)
 
         log.info("Отправляю пост %d/%d...", i + 1, len(posts))
-        success = send_message(post_text)
+
+        # Отправляем фото отдельным сообщением (без caption) — обходим лимит 1024 символа
+        if image_filename:
+            image_path = POSTS_DIR / image_filename
+            if image_path.exists():
+                send_photo(image_path, dry_run=dry_run)
+            else:
+                log.warning("Файл изображения не найден: %s — отправляю без картинки", image_filename)
+
+        # Текст поста — всегда отдельным сообщением после фото
+        success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             all_sent = False
@@ -263,19 +345,35 @@ def process_file(post_file: Path) -> bool:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Публикация постов в Telegram-канал")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Показать посты без реальной отправки в Telegram",
+    )
+    parser.add_argument(
+        "--post",
+        action="store_true",
+        help="Реальная отправка постов в Telegram (поведение по умолчанию)",
+    )
+    args = parser.parse_args()
+
+    dry_run = args.dry_run
+
     log.info("=" * 60)
-    log.info("Запуск постера")
+    log.info("Запуск постера%s", " (DRY RUN)" if dry_run else "")
     log.info("=" * 60)
 
-    # Проверяем обязательные переменные окружения
-    if not BOT_TOKEN:
+    # Проверяем обязательные переменные окружения (в dry-run BOT_TOKEN/CHANNEL_ID
+    # не обязательны для вывода, но нужны для формирования payload)
+    if not BOT_TOKEN and not dry_run:
         log.error(
             "BOT_TOKEN не установлен. "
             "Добавьте его в .env или GitHub Secrets."
         )
         sys.exit(1)
 
-    if not CHANNEL_ID:
+    if not CHANNEL_ID and not dry_run:
         log.error(
             "CHANNEL_ID не установлен. "
             "Добавьте его в .env или GitHub Secrets."
@@ -290,6 +388,7 @@ def main() -> None:
         p
         for p in POSTS_DIR.glob("*.md")
         if not p.stem.endswith("_posted")
+        and not p.stem.startswith("regen_")   # regen.py файлы не публикуем автоматически
         and p.name not in posted
         and p.name not in {"posted.log", "errors.log"}
     )
@@ -302,9 +401,9 @@ def main() -> None:
 
     for post_file in candidates:
         try:
-            success = process_file(post_file)
+            success = process_file(post_file, dry_run=dry_run)
 
-            if success:
+            if success and not dry_run:
                 # Переименовываем: 2026-03-01_09.md → 2026-03-01_09_posted.md
                 new_name = post_file.stem + "_posted.md"
                 new_path = post_file.parent / new_name
@@ -314,6 +413,11 @@ def main() -> None:
                     "✓ Файл помечен как опубликованный: %s → %s",
                     post_file.name,
                     new_name,
+                )
+            elif success and dry_run:
+                log.info(
+                    "DRY RUN: файл %s НЕ переименован и НЕ помечен",
+                    post_file.name,
                 )
             else:
                 log.error(
@@ -331,7 +435,7 @@ def main() -> None:
             log_error(post_file.name, str(exc))
 
     log.info("=" * 60)
-    log.info("Постер завершил работу")
+    log.info("Постер завершил работу%s", " (DRY RUN)" if dry_run else "")
     log.info("=" * 60)
 
 
