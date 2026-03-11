@@ -463,7 +463,7 @@ python scripts/trigger_bot.py
 | `OWNER_CHAT_ID` | да | Числовой Telegram ID владельца |
 | `GH_PAT` | да | PAT с правами на Actions |
 | `GITHUB_REPO` | нет | Репозиторий (по умолчанию: `Kedros64/telegram-channel-land-water`) |
-| `GITHUB_BRANCH` | нет | Ветка (по умолчанию: `master`) |
+| `GITHUB_BRANCH` | нет | Ветка (по умолчанию: `main`) |
 
 ---
 
@@ -549,7 +549,7 @@ Fix HTML selector threshold for gov sites
 | `OWNER_CHAT_ID`  | `trigger_bot.py`   | Числовой Telegram ID владельца (для ручного запуска)   |
 | `GH_PAT`   | `trigger_bot.py`   | PAT с правами Actions для запуска workflow              |
 | `GITHUB_REPO`    | `trigger_bot.py`   | Репозиторий (по умолчанию: `Kedros64/telegram-channel-land-water`) |
-| `GITHUB_BRANCH`  | `trigger_bot.py`   | Ветка для dispatch (по умолчанию: `master`)             |
+| `GITHUB_BRANCH`  | `trigger_bot.py`   | Ветка для dispatch (по умолчанию: `main`)             |
 
 Все переменные хранятся:
 - **Локально:** в файле `.env` (в `.gitignore`, не коммитится)

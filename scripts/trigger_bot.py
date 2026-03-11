@@ -13,7 +13,7 @@ trigger_bot.py — Telegram-бот для ручного запуска мони
     OWNER_CHAT_ID  — числовой Telegram ID владельца (узнай через @userinfobot)
     GH_PAT         — GitHub Personal Access Token (нужны права: workflow)
     GITHUB_REPO    — репозиторий (по умолчанию: Kedros64/telegram-channel-land-water)
-    GITHUB_BRANCH  — ветка для запуска (по умолчанию: master)
+    GITHUB_BRANCH  — ветка для запуска (по умолчанию: main)
 """
 
 import logging
@@ -31,7 +31,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_CHAT_ID = str(os.getenv("OWNER_CHAT_ID", ""))
 GITHUB_TOKEN = os.getenv("GH_PAT", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "Kedros64/telegram-channel-land-water")
-GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "master")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 WORKFLOW_FILE = "monitor_and_post.yml"
 
 REPO_ROOT = Path(__file__).parent.parent

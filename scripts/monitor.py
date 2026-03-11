@@ -349,7 +349,7 @@ def extract_image_prompt(post_text: str) -> str:
 
 def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None:
     """
-    Генерирует изображение через OpenAI Images API (gpt-image-1-mini).
+    Генерирует изображение через OpenAI Images API (dall-e-3).
     Сохраняет PNG в posts/YYYY-MM-DD_HH_post_N.png.
     При любой ошибке логирует предупреждение и возвращает None —
     пост в любом случае будет опубликован, просто без картинки.
@@ -834,7 +834,7 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
 def collect_all_articles(sources: list[dict]) -> list[dict]:
     """
     Обходит все активные источники, собирает до MAX_ARTICLES_PER_SOURCE
-    статей с каждого сайта. Никакой тематической фильтрации — это делает Gemini.
+    статей с каждого сайта. Никакой тематической фильтрации — это делает DeepSeek.
     """
     session = make_session()
     all_articles: list[dict] = []
@@ -922,7 +922,10 @@ def pre_filter_by_keywords(articles: list[dict]) -> list[dict]:
         ).lower()
         has_stop = any(sw in text for sw in STOP_WORDS)
         has_keyword = any(kw in text for kw in RELEVANCE_KEYWORDS)
-        if has_keyword and not has_stop:
+        # Статья нерелевантна ТОЛЬКО если содержит стоп-слово И НЕ содержит ни одного
+        # ключевого слова (по спецификации). Если ключевое слово есть — статья проходит
+        # всегда, даже при наличии стоп-слова (напр., земельный конфликт с упоминанием убийства).
+        if has_keyword:
             result.append(article)
     return result
 
