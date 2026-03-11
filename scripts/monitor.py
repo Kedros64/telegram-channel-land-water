@@ -242,7 +242,7 @@ def extract_image_prompt(post_text: str) -> str:
     Извлекает английский промпт из секции **ВИЗУАЛ:** сгенерированного поста.
     Возвращает строку или '' если секция отсутствует.
     """
-    match = re.search(r"Prompt \(EN\):\s*(.+?)(?:\n|$)", post_text)
+    match = re.search(r"\*{0,2}Prompt \(EN\):\*{0,2}\s*(.+?)(?:\n|$)", post_text)
     if match:
         return match.group(1).strip().strip("[]")
     return ""
