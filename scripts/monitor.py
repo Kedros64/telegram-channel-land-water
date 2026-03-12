@@ -18,6 +18,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -59,8 +60,10 @@ MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать �
 MAX_REGULAR_POSTS_PER_DAY = 6
 SUMMARY_POST_ARTICLES = 5  # Сколько новостей включать в вечерний саммари
 
-# Статьи старше этого числа дней удаляются из пула (если уже использованы)
+# Использованные статьи хранятся N дней для дедупликации (исключают повторные публикации)
 POOL_MAX_AGE_DAYS = 14
+# Неиспользованные статьи удаляются через N дней — не публикуем устаревшие новости
+POOL_UNUSED_MAX_AGE_DAYS = 7
 
 # Слова-маркеры регионального характера новости (для приоритизации федеральных)
 REGIONAL_MARKERS = [
@@ -360,6 +363,14 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
 
     log.info("Генерирую изображение для поста %d…", post_num)
     try:
+        # DALL-E 3 лучше соблюдает запреты, если они вынесены в самое начало промпта
+        no_text_prefix = (
+            "CRITICAL REQUIREMENT: NO text, NO words, NO letters, NO numbers, "
+            "NO signs, NO labels, NO captions, NO written characters of any kind "
+            "anywhere in the image. Purely visual scene, zero typography. "
+        )
+        full_prompt = no_text_prefix + prompt
+
         resp = requests.post(
             "https://api.openai.com/v1/images/generations",
             headers={
@@ -368,7 +379,7 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
             },
             json={
                 "model": OPENAI_IMAGE_MODEL,
-                "prompt": prompt[:1000],  # API limit
+                "prompt": full_prompt[:1000],  # API limit
                 "size": "1024x1024",
                 "quality": "standard",
                 "response_format": "b64_json",
@@ -409,15 +420,31 @@ def detect_post_type(now_msk: datetime) -> str:
     """
     Определяет тип поста по текущему времени МСК.
     Возвращает: "regular", "humorous" или "summary".
-    Если время не совпадает ни с одним слотом (ручной запуск) — "regular".
+
+    Использует расширенные окна на основе середин между слотами, чтобы
+    компенсировать типичную задержку GitHub Actions (20–70 мин):
+
+    Слот МСК → окно ответственности:
+      09:10 regular  → 04:00–10:20
+      11:30 regular  → 10:20–12:20
+      13:10 humorous → 12:20–14:20
+      15:30 regular  → 14:20–16:20
+      17:10 regular  → 16:20–18:20
+      19:30 humorous → 18:20–20:00
+      20:10 summary  → 20:00–04:00 (до следующего дня)
     """
-    hour, minute = now_msk.hour, now_msk.minute
-    # 13:10 и 19:30 — юмористические
-    if (hour == 13 and 0 <= minute <= 20) or (hour == 19 and 20 <= minute <= 40):
-        return "humorous"
-    # 20:10 — вечерний саммари
-    if hour == 20 and 0 <= minute <= 20:
+    t = now_msk.hour * 60 + now_msk.minute  # минуты с начала суток МСК
+
+    # Вечерний саммари (20:10): окно 20:00–4:00 следующего дня
+    if t >= 20 * 60 or t < 4 * 60:
         return "summary"
+    # Юмористический #2 (19:30): окно 18:20–20:00
+    if 18 * 60 + 20 <= t < 20 * 60:
+        return "humorous"
+    # Юмористический #1 (13:10): окно 12:20–14:20
+    if 12 * 60 + 20 <= t < 14 * 60 + 20:
+        return "humorous"
+    # Всё остальное — обычный пост
     return "regular"
 
 
@@ -470,6 +497,28 @@ def save_last_check(dt: datetime) -> None:
     """Сохраняет время текущей проверки в UTC ISO-формате."""
     POSTS_DIR.mkdir(exist_ok=True)
     LAST_CHECK_FILE.write_text(dt.isoformat(), encoding="utf-8")
+
+
+def _parse_any_date(date_str: str) -> datetime | None:
+    """
+    Парсит дату в формате RFC 2822 (RSS pubDate) или ISO 8601 (Atom updated).
+    Возвращает timezone-aware datetime или None если не удалось разобрать.
+    """
+    if not date_str:
+        return None
+    # ISO 8601 (Atom: "2026-03-12T09:00:00+00:00")
+    try:
+        dt = datetime.fromisoformat(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        pass
+    # RFC 2822 (RSS: "Wed, 12 Mar 2026 09:00:00 +0300")
+    try:
+        return parsedate_to_datetime(date_str)
+    except Exception:
+        return None
 
 
 def make_session() -> requests.Session:
@@ -570,6 +619,9 @@ def fetch_telegram_channel(source: dict, session: requests.Session) -> list[dict
         # Сообщения идут от старых к новым — берём последние (самые свежие)
         messages = messages[-MAX_ARTICLES_PER_SOURCE:]
 
+        # Отсекаем сообщения старше 48 часов — публикуем только свежие новости
+        tg_cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+
         seen: set[str] = set()
         for msg in reversed(messages):  # сначала самые новые
             text_el = msg.select_one(".tgme_widget_message_text")
@@ -582,13 +634,26 @@ def fetch_telegram_channel(source: dict, session: requests.Session) -> list[dict
                 continue
             seen.add(text)
 
-            # Ссылка на конкретное сообщение
+            # Ссылка и дата публикации из тега <a class="tgme_widget_message_date">
             date_el = msg.select_one("a.tgme_widget_message_date")
             msg_url = (
                 date_el["href"]
                 if date_el and date_el.get("href")
                 else f"https://t.me/{channel}"
             )
+
+            # Извлекаем точную дату из <time datetime="..."> и фильтруем старые сообщения
+            time_el = date_el.find("time") if date_el else None
+            pub_dt_str = time_el.get("datetime") if time_el else None
+            if pub_dt_str:
+                try:
+                    pub_dt = datetime.fromisoformat(pub_dt_str)
+                    if pub_dt.tzinfo is None:
+                        pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+                    if pub_dt < tg_cutoff:
+                        continue  # Сообщение старше 48 часов — пропускаем
+                except ValueError:
+                    pass  # Если дата не парсится — оставляем сообщение
 
             # Первый абзац/строка — как заголовок
             first_line = text.split("\n")[0].strip()
@@ -600,6 +665,8 @@ def fetch_telegram_channel(source: dict, session: requests.Session) -> list[dict
                     "content": text[:600],
                     "url": msg_url,
                     "source_name": name,
+                    "source_type": "telegram",  # Приоритет при выборе из пула
+                    "pub_date": pub_dt_str or "",
                 }
             )
 
@@ -637,7 +704,8 @@ def _parse_feed_entries(text: str) -> list[dict]:
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
             summary = (item.findtext("description") or "").strip()
-            entries.append({"title": title, "link": link, "summary": summary})
+            pub_date = (item.findtext("pubDate") or "").strip()
+            entries.append({"title": title, "link": link, "summary": summary, "pub_date": pub_date})
         return entries
 
     # Atom: <feed xmlns="http://www.w3.org/2005/Atom">
@@ -661,7 +729,11 @@ def _parse_feed_entries(text: str) -> list[dict]:
         summary_el = entry.find(f"{ns_tag}summary") or entry.find(f"{ns_tag}content")
         summary = (summary_el.text or "").strip() if summary_el is not None else ""
 
-        entries.append({"title": title, "link": link, "summary": summary})
+        # Atom использует <updated> или <published>
+        date_el = entry.find(f"{ns_tag}updated") or entry.find(f"{ns_tag}published")
+        pub_date = (date_el.text or "").strip() if date_el is not None else ""
+
+        entries.append({"title": title, "link": link, "summary": summary, "pub_date": pub_date})
 
     return entries
 
@@ -700,11 +772,21 @@ def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
             if not feed_entries:
                 continue
 
+            # Отсекаем статьи старше 7 дней по pubDate (если дата есть в фиде)
+            rss_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+
             articles = []
-            for entry in feed_entries[:MAX_ARTICLES_PER_SOURCE]:
+            for entry in feed_entries[:MAX_ARTICLES_PER_SOURCE * 2]:  # берём с запасом до фильтра
                 title = (entry.get("title") or "").strip()
                 if not title or len(title) < 10:
                     continue
+
+                # Фильтрация по дате публикации (RSS pubDate / Atom updated)
+                pub_date_str = entry.get("pub_date", "")
+                if pub_date_str:
+                    pub_dt = _parse_any_date(pub_date_str)
+                    if pub_dt and pub_dt < rss_cutoff:
+                        continue  # Статья опубликована более 7 дней назад — пропускаем
 
                 # summary может содержать HTML — чистим
                 raw_summary = entry.get("summary") or entry.get("description") or ""
@@ -718,8 +800,11 @@ def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
                         "content": summary_text,
                         "url": entry.get("link") or base_url,
                         "source_name": name,
+                        "pub_date": pub_date_str,
                     }
                 )
+                if len(articles) >= MAX_ARTICLES_PER_SOURCE:
+                    break
 
             if articles:
                 log.info(
@@ -844,8 +929,11 @@ def collect_all_articles(sources: list[dict]) -> list[dict]:
 
         if src_type == "telegram":
             articles = fetch_telegram_channel(source, session)
+            # source_type="telegram" уже проставлен внутри fetch_telegram_channel
         else:
             articles = fetch_site_articles(source, session)
+            for a in articles:
+                a.setdefault("source_type", "site")
             time.sleep(1)  # Вежливая пауза между запросами к сайтам
 
         all_articles.extend(articles)
@@ -995,12 +1083,16 @@ def merge_into_pool(
         existing_urls.add(url)
         added += 1
 
-    # Очистка: удаляем использованные статьи старше POOL_MAX_AGE_DAYS
-    cutoff_str = (now_msk - timedelta(days=POOL_MAX_AGE_DAYS)).isoformat()
+    # Очистка:
+    # - Использованные: хранятся POOL_MAX_AGE_DAYS дней для дедупликации
+    # - Неиспользованные: удаляются через POOL_UNUSED_MAX_AGE_DAYS (не публикуем устаревшие новости)
+    cutoff_used_str   = (now_msk - timedelta(days=POOL_MAX_AGE_DAYS)).isoformat()
+    cutoff_unused_str = (now_msk - timedelta(days=POOL_UNUSED_MAX_AGE_DAYS)).isoformat()
     before = len(pool)
     pool = [
         a for a in pool
-        if not a.get("used") or a.get("collected_at", "") > cutoff_str
+        if (a.get("used") and a.get("collected_at", "") > cutoff_used_str)
+        or (not a.get("used") and a.get("collected_at", "") > cutoff_unused_str)
     ]
     purged = before - len(pool)
 
@@ -1022,15 +1114,17 @@ def get_today_used_count(pool: list[dict], today_str: str) -> int:
 
 def _sort_by_priority(articles: list[dict]) -> list[dict]:
     """
-    Сортирует статьи по приоритету:
-    1. Федеральные (не региональные) — выше
-    2. Свежие — выше (collected_at desc)
-    Двухпроходная стабильная сортировка: сначала по дате desc, затем по региональности asc.
+    Сортирует статьи по приоритету (стабильная многопроходная сортировка):
+    1. Telegram-источники — выше сайтов (актуальная новость с точной датой)
+    2. Федеральные (не региональные) — выше региональных
+    3. Свежие — выше (по collected_at desc)
     """
     # Проход 1: свежие первыми
     result = sorted(articles, key=lambda a: a.get("collected_at", ""), reverse=True)
-    # Проход 2: федеральные (regional=False) первыми, региональные — в конце
+    # Проход 2: федеральные (regional=False) первыми
     result = sorted(result, key=lambda a: is_regional(a))
+    # Проход 3: Telegram-источники (source_type="telegram") выше сайтов
+    result = sorted(result, key=lambda a: a.get("source_type", "site") != "telegram")
     return result
 
 

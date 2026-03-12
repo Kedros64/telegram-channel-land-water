@@ -17,6 +17,7 @@ permissions:
 jobs:
   monitor-and-post:
     runs-on: ubuntu-latest
+    timeout-minutes: 25  # Предотвращает зависание workflow и блокировку следующих запусков
 
     steps:
       - name: Checkout repository
