@@ -602,6 +602,7 @@
     "source_name": "minprirody",
     "collected_at": "2026-03-14T09:38:51.462400+00:00",
     "category": "land",
-    "used": false
+    "used": true,
+    "used_at": "2026-03-14T19:22:32.278510+00:00"
   }
 ]
