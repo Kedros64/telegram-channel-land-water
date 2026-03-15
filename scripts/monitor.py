@@ -1129,30 +1129,48 @@ def _sort_by_priority(articles: list[dict]) -> list[dict]:
 
 
 def select_posts_from_pool(
-    pool: list[dict], today_str: str, count: int = 1
+    pool: list[dict], today_str: str, count: int = 1, allow_reuse: bool = False
 ) -> list[dict]:
     """
     Выбирает N неиспользованных статей из пула.
-    Приоритет: федеральные новости > региональные, свежие > старые.
-    Возвращает [] если пул пуст или дневной лимит исчерпан.
+    Приоритет: Telegram > федеральные > региональные, свежие > старые.
+
+    allow_reuse=True (для юмористических постов): если пул неиспользованных статей пуст,
+    берёт уже опубликованные сегодня статьи — они будут подданы под другим, юмористическим углом.
+    Это позволяет публиковать все 7 запланированных постов даже при нехватке уникального контента.
+
+    Возвращает [] если пул пуст и allow_reuse=False, или дневной лимит исчерпан.
     """
     used_today = get_today_used_count(pool, today_str)
     remaining = MAX_REGULAR_POSTS_PER_DAY - used_today
     log.info("Сегодня использовано: %d/%d постов", used_today, MAX_REGULAR_POSTS_PER_DAY)
 
-    if remaining <= 0 and count == 1:
-        # Лимит применяется только к обычным постам (count=1).
-        # Вечерний саммари (count=SUMMARY_POST_ARTICLES) выходит независимо от лимита.
+    if remaining <= 0 and count == 1 and not allow_reuse:
+        # Лимит применяется только к обычным постам (count=1) без права на переиспользование.
         log.info("Суточный лимит обычных постов исчерпан")
         return []
 
     # Неиспользованные, отсортированные по приоритету
     unused = [a for a in pool if not a.get("used")]
+
     if not unused:
+        if allow_reuse:
+            # Пул пуст — берём статьи, уже опубликованные сегодня (другой тон = другой пост)
+            today_used = [
+                a for a in pool
+                if a.get("used") and a.get("used_at", "").startswith(today_str)
+            ]
+            if today_used:
+                prioritized = _sort_by_priority(today_used)
+                log.info(
+                    "Пул пуст — переиспользую %d сегодняшних статей для поста",
+                    min(count, len(prioritized)),
+                )
+                return prioritized[:count]
         log.warning("Пул статей пуст — нет материалов для поста")
         return []
 
-    # Сортируем: федеральные первыми, потом по свежести
+    # Сортируем: Telegram > федеральные > свежие
     prioritized = _sort_by_priority(unused)
 
     selected = prioritized[:count]
@@ -1161,6 +1179,45 @@ def select_posts_from_pool(
         len(selected), count,
         [a.get("title", "")[:50] for a in selected],
     )
+    return selected
+
+
+def select_summary_articles(pool: list[dict], today_str: str) -> list[dict]:
+    """
+    Выбирает статьи для вечернего саммари (SUMMARY_POST_ARTICLES штук).
+
+    Логика: неиспользованные статьи пула → сегодняшние опубликованные посты.
+    Саммари — это дайджест дня, поэтому использование уже опубликованных материалов
+    не только допустимо, но и логично: читатель видит итог дня в одном месте.
+    """
+    unused = _sort_by_priority([a for a in pool if not a.get("used")])
+    today_used = _sort_by_priority([
+        a for a in pool
+        if a.get("used") and a.get("used_at", "").startswith(today_str)
+    ])
+
+    # Набираем: сначала неиспользованные, потом сегодняшние использованные
+    selected: list[dict] = []
+    seen_urls: set[str] = set()
+
+    for a in unused + today_used:
+        if len(selected) >= SUMMARY_POST_ARTICLES:
+            break
+        url = a.get("url", "")
+        if url and url in seen_urls:
+            continue
+        selected.append(a)
+        seen_urls.add(url)
+
+    if not selected:
+        log.warning("Нет материалов для вечернего саммари")
+    else:
+        fresh = sum(1 for a in selected if not a.get("used"))
+        reused = len(selected) - fresh
+        log.info(
+            "Саммари: выбрано %d статей (%d новых + %d из сегодняшних публикаций)",
+            len(selected), fresh, reused,
+        )
     return selected
 
 
@@ -1419,10 +1476,13 @@ def main() -> None:
 
     # 7. Выбираем статьи из пула в зависимости от типа поста
     if post_type == "summary":
-        # Вечерний саммари: берём 5 неиспользованных статей
-        selected_list = select_posts_from_pool(pool, today_str, count=SUMMARY_POST_ARTICLES)
+        # Вечерний саммари: неиспользованные + сегодняшние публикации (дайджест дня)
+        selected_list = select_summary_articles(pool, today_str)
+    elif post_type == "humorous":
+        # Юмористический: если пул пуст — переиспользуем сегодняшний материал под другим углом
+        selected_list = select_posts_from_pool(pool, today_str, count=1, allow_reuse=True)
     else:
-        # Обычный или юмористический: берём 1 статью
+        # Обычный: только свежие неиспользованные статьи
         selected_list = select_posts_from_pool(pool, today_str, count=1)
 
     if not selected_list:
