@@ -941,7 +941,8 @@
     "source_name": "rosvodresursy",
     "collected_at": "2026-03-22T14:21:13.494095+00:00",
     "category": "water",
-    "used": false
+    "used": true,
+    "used_at": "2026-03-24T09:57:34.917592+00:00"
   },
   {
     "title": "Channel name was changed to « 🌍 ЗЕМЕЛЬНОЕ БЮРО I Новосибирск »",
