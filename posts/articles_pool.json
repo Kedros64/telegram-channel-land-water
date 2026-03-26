@@ -1064,6 +1064,7 @@
     "source_name": "ecoeventru",
     "collected_at": "2026-03-25T19:56:47.419434+00:00",
     "category": "water",
-    "used": false
+    "used": true,
+    "used_at": "2026-03-26T10:01:00.602947+00:00"
   }
 ]
