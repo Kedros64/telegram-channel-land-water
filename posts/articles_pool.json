@@ -1171,6 +1171,7 @@
     "source_name": "minprirody",
     "collected_at": "2026-03-30T14:53:17.949386+00:00",
     "category": "both",
-    "used": false
+    "used": true,
+    "used_at": "2026-03-30T19:50:07.441154+00:00"
   }
 ]
