@@ -1269,6 +1269,7 @@
     "source_name": "profcadastre.ru",
     "collected_at": "2026-04-03T14:35:44.336139+00:00",
     "category": "land",
-    "used": false
+    "used": true,
+    "used_at": "2026-04-03T19:32:36.415074+00:00"
   }
 ]
