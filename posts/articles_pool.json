@@ -1854,6 +1854,7 @@
     "source_name": "dvizhenieru",
     "collected_at": "2026-05-17T11:13:30.990929+00:00",
     "category": "land",
-    "used": false
+    "used": true,
+    "used_at": "2026-05-17T14:58:46.951881+00:00"
   }
 ]
