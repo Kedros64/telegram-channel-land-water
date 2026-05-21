@@ -1974,5 +1974,24 @@
     "collected_at": "2026-05-20T21:11:35.872773+00:00",
     "category": "land",
     "used": false
+  },
+  {
+    "title": "Данилов Данильян раскритиковал подготовку водных экологических проектов https://www.youtube.com/watch?v=chAQPrsxCKU",
+    "content": "Данилов Данильян раскритиковал подготовку водных экологических проектов https://www.youtube.com/watch?v=chAQPrsxCKU",
+    "url": "https://t.me/minprirody/7654",
+    "source_name": "minprirody",
+    "collected_at": "2026-05-21T12:27:46.290513+00:00",
+    "category": "both",
+    "used": true,
+    "used_at": "2026-05-21T12:27:46.290513+00:00"
+  },
+  {
+    "title": "Росреестр ищет свободные земли в регионах для госнужд",
+    "content": "Ведомство проводит инвентаризацию, чтобы застроить незанятые территории и тем самым повысить «капитализацию» страны.",
+    "url": "https://pravo.ru/news/263796/",
+    "source_name": "pravo.ru",
+    "collected_at": "2026-05-21T12:27:46.290513+00:00",
+    "category": "land",
+    "used": false
   }
 ]
