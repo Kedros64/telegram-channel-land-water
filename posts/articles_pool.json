@@ -1922,7 +1922,8 @@
     "source_name": "profcadastre.ru",
     "collected_at": "2026-05-22T16:29:06.003235+00:00",
     "category": "land",
-    "used": false
+    "used": true,
+    "used_at": "2026-05-24T14:59:19.524198+00:00"
   },
   {
     "title": "Копии писем РОСРЕЕСТРА.",
