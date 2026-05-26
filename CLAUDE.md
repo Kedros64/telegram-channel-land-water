@@ -86,8 +86,8 @@ telegram-channel-land-water/
 │   ├── posted.log                         # Лог опубликованных (не в git)
 │   └── errors.log                         # Лог ошибок публикации (не в git)
 └── scripts/
-│   ├── monitor.py                         # Мониторинг + генерация постов (~930 строк)
-│   ├── poster.py                          # Публикация в Telegram (~340 строк)
+│   ├── monitor.py                         # Мониторинг + генерация постов (~1571 строка)
+│   ├── poster.py                          # Публикация в Telegram (~444 строки)
 │   └── trigger_bot.py                     # Бот для ручного запуска через Telegram
 └── .github/
     └── workflows/
@@ -104,16 +104,22 @@ telegram-channel-land-water/
 
 **Алгоритм (точный, по коду):**
 1. Читает `sources.xlsx`, фильтрует строки с `active` ∈ {да, yes, 1, true}
-2. Для каждого источника:
-   - **`type = telegram`** — скрапит публичный веб-вид канала через `https://t.me/s/{channel}` (BeautifulSoup, без MTProto)
-   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 30+ CSS-селекторами
-3. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
-4. **Keyword pre-filter** (`pre_filter_by_keywords`): отсекает статьи без ключевых слов и со стоп-словами
-5. **DeepSeek API filter** (`filter_relevant_with_deepseek`): отправляет заголовки батчами по `FILTER_BATCH_SIZE = 80`, получает JSON с релевантными ID
-6. Если DeepSeek недоступен на всех батчах — fallback на keyword-фильтрацию
-7. Генерирует пост через DeepSeek для каждого из топ-3 релевантных материалов (пауза 2 сек между генерациями)
-8. Сохраняет результат в `posts/ГГГГ-ММ-ДД_ЧЧ.md`
-9. Обновляет `posts/last_check.txt`
+2. Определяет тип поста (`detect_post_type`): regular / humorous / summary — по времени МСК с окном ±70 мин от центра слота
+3. Для каждого источника:
+   - **`type = telegram`** — скрапит публичный веб-вид канала через `https://t.me/s/{channel}` (BeautifulSoup, без MTProto), фильтрует сообщения старше 48 ч
+   - **`type = site`** — сначала пробует RSS (9 стандартных путей + сам URL), затем HTML-парсинг с 30+ CSS-селекторами; RSS-статьи старше 7 дней отсекаются
+4. Собирает до `MAX_ARTICLES_PER_SOURCE = 10` статей с каждого источника
+5. **Keyword pre-filter** (`pre_filter_by_keywords`): статья проходит если есть хотя бы одно включающее слово (стоп-слова не блокируют при наличии ключевого)
+6. **DeepSeek API filter** (`filter_relevant_with_deepseek`): батчи по 80 заголовков → JSON с релевантными ID; fallback на keyword-фильтр если API недоступен
+7. **Пул статей** (`articles_pool.json`): новые статьи добавляются через `merge_into_pool`; дедупликация по URL; неиспользованные удаляются через 7 дней, использованные — через 14
+8. **Выбор из пула** по типу поста:
+   - `regular`: только неиспользованные статьи, сортировка: свежие → федеральные → Telegram
+   - `humorous`: неиспользованные; если нет — сегодняшние опубликованные (другой угол подачи)
+   - `summary`: до 5 статей — сначала неиспользованные, затем сегодняшние опубликованные
+9. Валидация ссылок (HEAD/GET) — нерабочие URL обнуляются
+10. DeepSeek API: генерирует пост по типу (`generate_post` / `generate_summary_post`)
+11. OpenAI DALL-E 3: генерирует иллюстрацию (если `OPENAI_API_KEY` задан); промпт предваряется требованием «NO text»
+12. Сохраняет результат в `posts/ГГГГ-ММ-ДД_ЧЧ.md`, обновляет `posts/last_check.txt`
 
 **Ключевые константы:**
 | Константа | Значение | Назначение |
@@ -124,6 +130,7 @@ telegram-channel-land-water/
 | `SUMMARY_POST_ARTICLES` | 5 | Новостей в вечернем саммари |
 | `FILTER_BATCH_SIZE` | 80 | Заголовков в одном запросе к DeepSeek |
 | `POOL_MAX_AGE_DAYS` | 14 | Срок хранения использованных статей в пуле |
+| `POOL_UNUSED_MAX_AGE_DAYS` | 7 | Срок хранения неиспользованных статей в пуле |
 
 **Особенности:**
 - SSL-предупреждения подавлены (`urllib3.disable_warnings`) — многие госсайты имеют самоподписанные сертификаты
@@ -582,17 +589,22 @@ Fix HTML selector threshold for gov sites
 
 | Функциональность | Файл | Строки |
 |-----------------|------|--------|
-| Главный pipeline | monitor.py | 843–928 |
-| Вызовы DeepSeek API (генерация) | monitor.py | 179–204 |
-| Вызовы DeepSeek API (фильтрация) | monitor.py | 687–763 |
-| Скрапинг Telegram-каналов | monitor.py | 300–374 |
-| RSS-парсинг | monitor.py | 377–491 |
-| HTML-парсинг | monitor.py | 494–563 |
-| Keyword-фильтрация | monitor.py | 668–684 |
-| Ключевые слова (RELEVANCE_KEYWORDS) | monitor.py | 640–664 |
-| Извлечение постов (regex) | poster.py | 79–90 |
-| Конвертация Markdown → HTML | poster.py | 98–120 |
-| Отправка в Telegram | poster.py | 147–203 |
+| Главный pipeline | monitor.py | 1409–1571 |
+| Определение типа поста | monitor.py | 419–449 |
+| Выбор статей из пула (regular/humorous) | monitor.py | 1131–1183 |
+| Выбор статей для саммари | monitor.py | 1185–1221 |
+| Приоритизация статей | monitor.py | 1115–1129 |
+| Слияние статей в пул | monitor.py | 1063–1105 |
+| Вызовы DeepSeek API (генерация) | monitor.py | 310–340 |
+| Вызовы DeepSeek API (фильтрация) | monitor.py | 1224–1307 |
+| Скрапинг Telegram-каналов | monitor.py | 592–685 |
+| RSS-парсинг | monitor.py | 741–820 |
+| HTML-парсинг | monitor.py | 822–892 |
+| Keyword-фильтрация | monitor.py | 999–1024 |
+| Ключевые слова (RELEVANCE_KEYWORDS) | monitor.py | 971–997 |
+| Извлечение постов (regex) | poster.py | 81–109 |
+| Конвертация Markdown → HTML | poster.py | 117–139 |
+| Отправка в Telegram | poster.py | 166–234 |
 | Команды бота (/run, /status) | trigger_bot.py | 143–165 |
 | GitHub Actions dispatch | trigger_bot.py | 91–135 |
 | Расписание workflow (cron) | monitor_and_post.yml | 4–11 |
@@ -611,4 +623,4 @@ Fix HTML selector threshold for gov sites
 
 ---
 
-*Последнее обновление: 2026-03-11 — Исправлены неточности (счётчик CSS-селекторов, ссылки на строки кода), добавлены: секция GitHub Actions workflow, CSS-классы Telegram-скрапинга, точная регулярка poster.py, таблица ключевых мест в коде*
+*Последнее обновление: 2026-05-26 — Обновлены строки кода (monitor.py вырос до ~1571 строки), добавлена константа `POOL_UNUSED_MAX_AGE_DAYS`, уточнён алгоритм выбора статей по типу поста (regular/humorous/summary), исправлены все ссылки на строки кода*
