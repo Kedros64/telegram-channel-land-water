@@ -2113,6 +2113,7 @@
     "source_name": "rosvodresursy",
     "collected_at": "2026-05-29T16:57:36.142293+00:00",
     "category": "water",
-    "used": false
+    "used": true,
+    "used_at": "2026-05-30T11:21:01.091428+00:00"
   }
 ]
