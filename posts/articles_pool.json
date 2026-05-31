@@ -2086,6 +2086,7 @@
     "source_name": "prozemli",
     "collected_at": "2026-05-31T11:37:28.737348+00:00",
     "category": "land",
-    "used": false
+    "used": true,
+    "used_at": "2026-05-31T15:09:26.999010+00:00"
   }
 ]
