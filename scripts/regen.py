@@ -50,7 +50,10 @@ from monitor import (
 from poster import (
     BOT_TOKEN,
     CHANNEL_ID,
+    TELEGRAM_CAPTION_MAX,
     extract_posts,
+    sanitize_for_telegram,
+    raw_image_url,
     send_photo,
     send_message,
 )
@@ -117,15 +120,25 @@ def send_posts_to_telegram(md_file: Path, dry_run: bool) -> None:
 
         log.info("Отправляю пост %d/%d…", i + 1, len(posts))
 
-        # Фото — отдельным сообщением (без caption), текст — следом
-        if image_filename:
-            image_path = POSTS_DIR / image_filename
-            if image_path.exists():
-                send_photo(image_path, dry_run=dry_run)
-            else:
-                log.warning("Изображение не найдено: %s — отправляю без картинки", image_filename)
+        # Картинка и текст — ОДНИМ сообщением (как в poster.py):
+        #   короткий пост → sendPhoto с caption; длинный → превью-картинка над текстом.
+        plain_len = len(sanitize_for_telegram(post_text))
+        image_path = POSTS_DIR / image_filename if image_filename else None
+        image_exists = bool(image_path and image_path.exists())
 
-        success = send_message(post_text, dry_run=dry_run)
+        if image_filename and not image_exists:
+            log.warning("Изображение не найдено: %s", image_filename)
+
+        if image_exists and plain_len <= TELEGRAM_CAPTION_MAX:
+            success = send_photo(image_path, caption=post_text, dry_run=dry_run)
+            if not success:
+                success = send_message(post_text, dry_run=dry_run)
+        elif image_filename:
+            success = send_message(
+                post_text, image_url=raw_image_url(image_filename), dry_run=dry_run
+            )
+        else:
+            success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             log.error("Не удалось отправить пост %d", i + 1)

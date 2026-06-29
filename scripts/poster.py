@@ -35,6 +35,12 @@ ERRORS_LOG = POSTS_DIR / "errors.log"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
+# Для картинки-в-теле поста: публичный raw-URL изображения из этого же репозитория.
+# Workflow коммитит и пушит PNG в ветку ДО шага публикации, поэтому ссылка уже живая.
+# В GitHub Actions GITHUB_REPOSITORY задаётся автоматически.
+GITHUB_REPO = os.getenv("GITHUB_REPO") or os.getenv("GITHUB_REPOSITORY") or "Kedros64/telegram-channel-land-water"
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH") or os.getenv("GITHUB_REF_NAME") or "main"
+
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
 PAUSE_BETWEEN_POSTS = 30    # секунды между постами из одного файла
 TELEGRAM_MAX_LENGTH = 4096  # максимум символов в одном сообщении Telegram
@@ -163,28 +169,48 @@ def sanitize_for_telegram(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def send_message(text: str, dry_run: bool = False) -> bool:
+def raw_image_url(image_filename: str) -> str:
+    """Публичный raw-URL картинки в репозитории (для превью над текстом поста)."""
+    return (
+        f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}"
+        f"/posts/{image_filename}"
+    )
+
+
+def send_message(text: str, image_url: str | None = None, dry_run: bool = False) -> bool:
     """
     Отправляет сообщение в Telegram-канал через Bot API.
+    Если задан image_url — картинка показывается КРУПНЫМ превью НАД текстом,
+    то есть пост и картинка остаются ОДНИМ сообщением (обход лимита подписи 1024).
     Сначала пробует с HTML-разметкой; при ошибке разбора — без разметки.
-    В режиме dry_run показывает, что будет отправлено, без реальной отправки.
     Возвращает True при успехе (или при dry_run).
     """
     api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendMessage"
     html_text = markdown_to_html(sanitize_for_telegram(text))
 
+    if image_url:
+        # Картинка-в-теле: крупное превью над текстом, в одном сообщении
+        link_preview = {
+            "is_disabled": False,
+            "url": image_url,
+            "prefer_large_media": True,
+            "show_above_text": True,
+        }
+    else:
+        link_preview = {"is_disabled": True}
+
     payload = {
         "chat_id": CHANNEL_ID,
         "text": html_text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False,
+        "link_preview_options": link_preview,
     }
 
     if dry_run:
         log.info("=== DRY RUN — пост НЕ отправлен ===")
         log.info("chat_id: %s", CHANNEL_ID)
         log.info("parse_mode: HTML")
-        log.info("disable_web_page_preview: False")
+        log.info("link_preview_options: %s", link_preview)
         log.info("Длина текста: %d символов", len(html_text))
         log.info("--- Текст поста (HTML) ---")
         print(html_text)
@@ -234,25 +260,33 @@ def send_message(text: str, dry_run: bool = False) -> bool:
         return False
 
 
-def send_photo(image_path: Path, dry_run: bool = False) -> bool:
+def send_photo(image_path: Path, caption: str = "", dry_run: bool = False) -> bool:
     """
-    Отправляет фото без подписи в Telegram-канал через sendPhoto.
-    Текст поста отправляется отдельным сообщением после фото — это
-    обходит лимит caption (1024 символа) и позволяет публиковать
-    полный текст любой длины.
+    Отправляет фото в Telegram-канал через sendPhoto с подписью (caption).
+    Используется для КОРОТКИХ постов (текст ≤ 1024 символов) — картинка и текст
+    уходят ОДНИМ сообщением, картинка сверху. Для длинных постов используется
+    send_message с превью-картинкой над текстом.
     Возвращает False при ошибке — тогда публикуется только текст.
     """
     api_url = f"{TELEGRAM_API_BASE.format(token=BOT_TOKEN)}/sendPhoto"
+    html_caption = markdown_to_html(sanitize_for_telegram(caption)) if caption else ""
 
     if dry_run:
         log.info("=== DRY RUN — фото НЕ отправлено: %s ===", image_path.name)
+        if html_caption:
+            log.info("--- Подпись (HTML) ---")
+            print(html_caption)
         return True
 
     try:
         with open(image_path, "rb") as f:
+            data_fields = {"chat_id": CHANNEL_ID}
+            if html_caption:
+                data_fields["caption"] = html_caption
+                data_fields["parse_mode"] = "HTML"
             resp = requests.post(
                 api_url,
-                data={"chat_id": CHANNEL_ID},
+                data=data_fields,
                 files={"photo": (image_path.name, f, "image/png")},
                 timeout=60,
             )
@@ -260,8 +294,23 @@ def send_photo(image_path: Path, dry_run: bool = False) -> bool:
 
         if data.get("ok"):
             msg_id = data.get("result", {}).get("message_id", "?")
-            log.info("✓ Фото отправлено (message_id=%s)", msg_id)
+            log.info("✓ Фото с подписью отправлено (message_id=%s)", msg_id)
             return True
+
+        # Если caption не распарсился — пробуем без HTML-разметки
+        desc = str(data.get("description", "")).lower()
+        if html_caption and ("can't parse" in desc or "bad request" in desc):
+            log.warning("Ошибка разбора подписи — повтор без HTML-разметки…")
+            with open(image_path, "rb") as f:
+                resp2 = requests.post(
+                    api_url,
+                    data={"chat_id": CHANNEL_ID, "caption": sanitize_for_telegram(caption)},
+                    files={"photo": (image_path.name, f, "image/png")},
+                    timeout=60,
+                )
+            if resp2.json().get("ok"):
+                log.info("✓ Фото с подписью отправлено (без разметки)")
+                return True
 
         log.warning(
             "Telegram sendPhoto вернул ошибку: %s — публикую только текст",
@@ -319,16 +368,29 @@ def process_file(post_file: Path, dry_run: bool = False) -> bool:
 
         log.info("Отправляю пост %d/%d...", i + 1, len(posts))
 
-        # Отправляем фото отдельным сообщением (без caption) — обходим лимит 1024 символа
-        if image_filename:
-            image_path = POSTS_DIR / image_filename
-            if image_path.exists():
-                send_photo(image_path, dry_run=dry_run)
-            else:
-                log.warning("Файл изображения не найден: %s — отправляю без картинки", image_filename)
+        # Картинка и текст — ОДНИМ сообщением.
+        #   • короткий пост (≤ лимита подписи) → sendPhoto с caption (картинка + текст вместе);
+        #   • длинный пост → sendMessage с превью-картинкой над текстом (link_preview_options);
+        #   • нет картинки → обычное сообщение.
+        plain_len = len(sanitize_for_telegram(post_text))
+        image_path = POSTS_DIR / image_filename if image_filename else None
+        image_exists = bool(image_path and image_path.exists())
 
-        # Текст поста — всегда отдельным сообщением после фото
-        success = send_message(post_text, dry_run=dry_run)
+        if image_filename and not image_exists:
+            log.warning("Файл изображения не найден: %s", image_filename)
+
+        if image_exists and plain_len <= TELEGRAM_CAPTION_MAX:
+            success = send_photo(image_path, caption=post_text, dry_run=dry_run)
+            if not success:
+                # фото не ушло — публикуем хотя бы текст
+                success = send_message(post_text, dry_run=dry_run)
+        elif image_filename:
+            # Длинный пост: картинка как превью над текстом (raw-URL из репозитория)
+            success = send_message(
+                post_text, image_url=raw_image_url(image_filename), dry_run=dry_run
+            )
+        else:
+            success = send_message(post_text, dry_run=dry_run)
 
         if not success:
             all_sent = False
