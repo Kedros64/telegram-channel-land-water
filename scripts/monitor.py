@@ -18,6 +18,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -51,16 +52,28 @@ DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# gpt-image-1-mini лучше слушается инструкций «без текста» и дешевле dall-e-3
 OPENAI_IMAGE_MODEL = "gpt-image-1-mini"
 
 MAX_ARTICLES_PER_SOURCE = 10  # Сколько заголовков брать с каждого сайта
 
-# Квоты постов за один сеанс публикации: 2 земельных + 1 водный
-LAND_POSTS_COUNT  = 2
-WATER_POSTS_COUNT = 1
+# Максимум обычных постов в день (6 регулярных + 1 саммари = 7 запусков)
+MAX_REGULAR_POSTS_PER_DAY = 6
+SUMMARY_POST_ARTICLES = 5  # Сколько новостей включать в вечерний саммари
 
-# Статьи старше этого числа дней удаляются из пула (если уже использованы)
-POOL_MAX_AGE_DAYS = 14
+# Статьи старше этого числа дней удаляются из пула (использованные И неиспользованные)
+POOL_MAX_AGE_DAYS = 10
+
+# Новости с датой публикации старше этого числа дней не берём в работу
+MAX_NEWS_AGE_DAYS = 10
+
+# Слова-маркеры регионального характера новости (для приоритизации федеральных)
+REGIONAL_MARKERS = [
+    "область", "край", "республика", "округ", "район",
+    "город ", "села ", "посёлок", "поселок", "деревня",
+    "губернатор", "мэр ", "глава района", "глава города",
+    "областн", "краев", "муниципальн", "региональн",
+]
 
 # Ключевые слова для классификации статей по тематике
 WATER_CATEGORY_KEYWORDS = [
@@ -159,35 +172,52 @@ DEEPSEEK_FILTER_PROMPT = """\
 """
 
 DEEPSEEK_POST_PROMPT = """\
-Ты — редактор Telegram-канала о земельном и водном праве России.
-Канал читают предприниматели, фермеры, арендаторы, владельцы участков и водоёмов.
-Автор канала — консультант по оформлению водопользования, ГТС, прудов, земельных участков и лесфонда.
+Ты — автор Telegram-канала о земельном и водном праве России. Пишешь как живой
+практикующий консультант (оформление водопользования, ГТС, прудов, участков, лесфонда,
+водозабора и водосброса), а НЕ как нейросеть. Канал читают предприниматели, фермеры,
+арендаторы, владельцы участков и водоёмов.
 
-Вот исходный материал:
+ВАЖНО ПРО ТОН: Мы на стороне читателя, присоединяемся к его эмоциям. Читатель должен
+чувствовать: «эти ребята понимают мою боль, они со мной заодно». Не поучаем свысока —
+как коллега, который сам через это прошёл.
+
+СЕГОДНЯ: {today}. Текущий год — {year}.
+
+Исходный материал:
 ЗАГОЛОВОК: {title}
 ТЕКСТ/АНОНС: {content}
 ИСТОЧНИК: {source_name}
 ССЫЛКА: {url}
+ДАТА МАТЕРИАЛА: {published}
 
-Сформируй готовый пост для Telegram строго по структуре ниже.
+АКТУАЛЬНОСТЬ (это важно):
+- Сегодня {today}. НЕ выдавай старое за свежее. Если в материале фигурирует прошлый
+  год или дата старше 10 дней — не пиши «свежая новость», «на этой неделе», «только что»,
+  «недавно приняли». Пиши нейтрально: «по состоянию на <год/дату>», «напоминаем», «как известно».
+- Никогда не называй прошедший год текущим. Если в источнике «{prev_year}» — это уже не новинка.
+- Если материал явно устарел и подать его даже как полезное напоминание не получается —
+  выведи первой строкой ровно слово SKIP и больше ничего не пиши.
+
+Сформируй готовый пост для Telegram в формате ниже.
 
 **ГОТОВЫЙ ПОСТ:**
-[Пост 800–1500 символов с пробелами.
+[Пост 700–1300 знаков.
 
-СТРУКТУРА:
-1. ЗАГОЛОВОК-ХУК — первая строка поста, выделена жирным (**жирный**). Одна короткая фраза или предложение, которое цепляет внимание и отражает суть. Никаких вводных слов перед ним.
-2. Суть материала простым языком — что произошло и что это значит для читателя на практике. Разбивай на абзацы. Если уместно — используй маркеры или нумерованный список.
-3. Если упомянут нормативный акт — обязательно назови его.
-4. Если материал про конкретный регион — упомяни.
-5. Вывод с лёгкой иронией над ситуацией или бюрократией — дружелюбной, «подмигивающей», не злой и не токсичной.
-6. Один CTA в конце.
-
-ОФОРМЛЕНИЕ:
-- Добавляй уместные смайлики по тексту для усиления эмоций и смысловых акцентов.
-- Важные мысли и ключевые фразы выделяй жирным (**жирный**). Жирного не больше 20–25% текста.
-- Ирония и самоирония приветствуются по всему тексту там, где уместно — лёгкие, неожиданные формулировки, без грубости и оскорблений.
-- Тон: живой, немного хулиганский, без канцелярита, без хамства.
-- Никаких юридических гарантий — только «как правило», «по практике», «есть риск что».]
+КАК ПИСАТЬ (живо, без шаблона):
+- Каждый пост — РАЗНЫЙ по структуре. НЕ повторяй из поста в пост один каркас
+  «Что это значит на практике → список → Вывод». Где-то уместен список, где-то — связный рассказ.
+- Начинай по-разному: вопрос, короткая сцена, цифра, мини-история клиента, наблюдение.
+  Первая строка — цепляющий заголовок жирным (**...**), без вводных слов.
+- Суть простым языком: что произошло и что конкретно делать собственнику участка/пруда.
+- Если упомянут нормативный акт — назови его. Если есть регион — упомяни, но покажи, что это касается всех.
+- Присоединись к эмоциям читателя (раздражение, тревога, недоумение) — мы на одной стороне.
+- ЗАПРЕЩЕНО повторять штампы: «бюрократический марафон», «Большой Брат»,
+  «природа и бюрократия в танце/танцуют», «как хороший пожарный», «грешная земля».
+  Ирония каждый раз своя и свежая, по делу, без злости.
+- CTA — НЕ в каждом посте (примерно в одном из трёх), ненавязчиво: автор помогает с оформлением
+  водопользования, ГТС, участков, лесфонда, водозабора и водосброса.
+- 1–3 эмодзи на пост, не в каждом абзаце. Жирным — не больше 15–20% текста.
+- Никаких юридических гарантий — только «как правило», «по практике», «есть риск, что».]
 
 **ВАРИАНТЫ CTA:**
 Нейтральный: [вариант]
@@ -195,9 +225,111 @@ DEEPSEEK_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Photorealistic image, natural lighting, high detail, realistic colors, no text, no lettering, no captions. Описывай атмосферу и контекст поста. Если в кадре люди — только нейтральные собирательные образы, без реальных известных личностей.]
+Prompt (EN): [Photorealistic editorial photo, natural lighting, high detail, realistic colors.
+Передай атмосферу поста через ПРИРОДУ, ЛАНДШАФТ, ВОДУ, ЛЮДЕЙ ЗА ДЕЛОМ.
+СТРОГО ЗАПРЕЩЕНО включать любые носители текста: вывески, таблички, указатели, дорожные и
+информационные знаки, документы, бумаги, газеты, экраны, плакаты, баннеры, надписи, логотипы, цифры.
+no text, no letters, no words, no signs, no signboards, no labels, no documents, no posters,
+no banners, no watermark, no logo. Если есть люди — собирательные образы, без известных личностей.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [более простой промпт в том же фотореалистичном стиле, no text, no lettering]
+Запасной вариант: [более простой промпт в том же стиле, без любых носителей текста, no text, no letters]
+"""
+
+DEEPSEEK_HUMOROUS_POST_PROMPT = """\
+Ты — автор Telegram-канала о земельном и водном праве России, пишешь как живой человек.
+Канал читают предприниматели, фермеры, арендаторы, владельцы участков и водоёмов.
+Автор — консультант по оформлению водопользования, ГТС, прудов, участков, лесфонда, водозабора и водосброса.
+
+ВАЖНО: Это ЮМОРИСТИЧЕСКИЙ пост (обед или конец рабочего дня) — разрядить, вызвать улыбку.
+Больше сарказма и остроумия, чем обычно. Но мы на стороне читателя: подшучиваем над
+СИТУАЦИЯМИ и бюрократией, а не над людьми.
+
+СЕГОДНЯ: {today}. Текущий год — {year}.
+
+Исходный материал:
+ЗАГОЛОВОК: {title}
+ТЕКСТ/АНОНС: {content}
+ИСТОЧНИК: {source_name}
+ССЫЛКА: {url}
+ДАТА МАТЕРИАЛА: {published}
+
+АКТУАЛЬНОСТЬ:
+- Сегодня {today}. Не выдавай старое за свежее: при прошлогодней дате или дате старше 10 дней
+  не пиши «свежая новость/только что/недавно». Прошедший год ({prev_year}) — не новинка.
+- Если материал явно устарел и обыграть его не получается — выведи первой строкой SKIP и всё.
+
+**ГОТОВЫЙ ПОСТ:**
+[Пост 700–1300 знаков.
+
+КАК ПИСАТЬ (живо, без шаблона):
+- Первая строка — ироничный цепляющий заголовок жирным (**...**): неожиданное наблюдение или абсурдный вывод.
+- Структуру НЕ повторяй из поста в пост. Суть — с юмором: гиперболы, риторические вопросы, неожиданные сравнения.
+- Если упомянут нормативный акт — назови (можно с ироничным комментарием). Регион — обыграй по-доброму.
+- ЗАПРЕЩЕНО повторять штампы: «бюрократический марафон», «Большой Брат»,
+  «природа и бюрократия в танце/танцуют», «как хороший пожарный», «грешная земля». Каждый раз — новая шутка.
+- Саркастический, но добрый вывод. CTA — по желанию, ненавязчиво (автор помогает с оформлением).
+- Смайлики щедрее обычного, но в меру. Жирным — не больше 25%. Без злости, хамства, оскорблений.
+- Никаких юридических гарантий.]
+
+**ВАРИАНТЫ CTA:**
+Нейтральный: [вариант]
+С юмором: [вариант]
+Прямой: [вариант]
+
+**ВИЗУАЛ:**
+Prompt (EN): [Photorealistic editorial photo, natural lighting, high detail, realistic colors.
+HUMOROUS scene — gentle exaggeration or unexpected juxtaposition related to the topic, not offensive.
+СТРОГО ЗАПРЕЩЕНО включать любые носители текста: вывески, таблички, знаки, документы, бумаги, экраны,
+плакаты, баннеры, надписи, логотипы, цифры. no text, no letters, no words, no signs, no labels,
+no documents, no posters, no watermark, no logo. Если есть люди — собирательные образы.]
+Описание (RU): [2–3 слова]
+Запасной вариант: [более простой юмористический промпт, без любых носителей текста, no text, no letters]
+"""
+
+DEEPSEEK_SUMMARY_POST_PROMPT = """\
+Ты — редактор Telegram-канала о земельном и водном праве России.
+Канал читают предприниматели, фермеры, арендаторы, владельцы участков и водоёмов.
+Автор канала — консультант по оформлению водопользования, ГТС, прудов, земельных участков и лесфонда.
+
+Это ВЕЧЕРНИЙ САММАРИ — дайджест за день. Задача — дать читателю быстрый обзор главных новостей дня, чтобы он мог за 1 минуту понять что произошло важного.
+
+СЕГОДНЯ: {today}. Текущий год — {year}. Не подавай прошлогодние материалы как сегодняшние;
+если новость старше — формулируй нейтрально («по состоянию на …»), без «сегодня/только что».
+
+Вот {count} новостей для саммари:
+{articles_block}
+
+Сформируй саммари-пост для Telegram строго по структуре ниже.
+
+**ГОТОВЫЙ ПОСТ:**
+[Пост 1200–2000 символов с пробелами.
+
+СТРУКТУРА:
+1. ЗАГОЛОВОК: **📋 Дайджест дня: земля и вода** (или похожий, с эмодзи)
+2. Краткое вступление (1 предложение) — «Что произошло сегодня в мире земли и воды»
+3. Для каждой из {count} новостей — пронумерованный блок:
+   - Жирный подзаголовок (**заголовок**)
+   - 2–3 предложения: суть и что это значит на практике
+   - Если есть нормативный акт — упомяни
+4. Краткое заключение (1–2 предложения) с лёгкой иронией
+5. CTA — ненавязчивое упоминание услуг автора
+
+ОФОРМЛЕНИЕ:
+- Каждую новость отделяй пустой строкой
+- Смайлики к каждой новости для быстрого сканирования
+- Жирный для подзаголовков
+- Присоединение к эмоциям читателя — «мы с вами в одной лодке»
+- Тон: живой, дружелюбный, без канцелярита]
+
+**ВАРИАНТЫ CTA:**
+Нейтральный: [вариант]
+С юмором: [вариант]
+Прямой: [вариант]
+
+**ВИЗУАЛ:**
+Prompt (EN): [Photorealistic collage-style image divided into {count} panels, each panel a different nature/landscape/water scene related to one of the topics. Natural lighting, realistic colors. СТРОГО no text, no letters, no words, no captions, no signs, no labels, no documents, no posters, no numbers, no watermark, no logo anywhere. Panels separated by thin plain lines.]
+Описание (RU): [2–3 слова]
+Запасной вариант: [single photorealistic landscape combining land and water themes, без любых носителей текста, no text, no letters, no signs]
 """
 
 # ---------------------------------------------------------------------------
@@ -242,7 +374,7 @@ def extract_image_prompt(post_text: str) -> str:
     Извлекает английский промпт из секции **ВИЗУАЛ:** сгенерированного поста.
     Возвращает строку или '' если секция отсутствует.
     """
-    match = re.search(r"Prompt \(EN\):\s*(.+?)(?:\n|$)", post_text)
+    match = re.search(r"\*{0,2}Prompt \(EN\):\*{0,2}\s*(.+?)(?:\n|$)", post_text)
     if match:
         return match.group(1).strip().strip("[]")
     return ""
@@ -259,6 +391,15 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
         log.debug("OPENAI_API_KEY не задан — генерация изображений пропущена")
         return None
 
+    # Жёсткое подкрепление запрета текста: модель не принимает отдельный negative_prompt,
+    # поэтому добавляем запрет прямо в конец промпта — действует независимо от текста ВИЗУАЛ.
+    no_text_suffix = (
+        " Strictly NO text, no letters, no words, no captions, no numbers, "
+        "no signs, no signboards, no road signs, no labels, no documents, no papers, "
+        "no posters, no banners, no screens with text, no watermark, no logo anywhere in the image."
+    )
+    final_prompt = prompt[:820].rstrip() + no_text_suffix
+
     log.info("Генерирую изображение для поста %d…", post_num)
     try:
         resp = requests.post(
@@ -269,7 +410,7 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
             },
             json={
                 "model": OPENAI_IMAGE_MODEL,
-                "prompt": prompt[:1000],  # API limit
+                "prompt": final_prompt[:1000],  # API limit
                 "size": "1024x1024",
                 "quality": "low",
                 "n": 1,
@@ -303,6 +444,53 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
 def moscow_now() -> datetime:
     """Текущее время по Москве (UTC+3)."""
     return datetime.now(timezone.utc) + MOSCOW_OFFSET
+
+
+def detect_post_type(now_msk: datetime) -> str:
+    """
+    Определяет тип поста по текущему времени МСК.
+    Возвращает: "regular", "humorous" или "summary".
+    Если время не совпадает ни с одним слотом (ручной запуск) — "regular".
+    """
+    hour, minute = now_msk.hour, now_msk.minute
+    # 13:10 и 19:30 — юмористические
+    if (hour == 13 and 0 <= minute <= 20) or (hour == 19 and 20 <= minute <= 40):
+        return "humorous"
+    # 20:10 — вечерний саммари
+    if hour == 20 and 0 <= minute <= 20:
+        return "summary"
+    return "regular"
+
+
+def is_regional(article: dict) -> bool:
+    """
+    Проверяет, является ли статья узко-региональной.
+    Региональные новости получают меньший приоритет при выборе.
+    """
+    text = (
+        (article.get("title") or "") + " " + (article.get("content") or "")
+    ).lower()
+    regional_count = sum(1 for marker in REGIONAL_MARKERS if marker in text)
+    return regional_count >= 2
+
+
+def validate_url(url: str, session: requests.Session | None = None) -> bool:
+    """
+    Проверяет работоспособность URL (HEAD-запрос с fallback на GET).
+    Возвращает True если URL отвечает 2xx/3xx.
+    """
+    if not url or not url.startswith("http"):
+        return False
+    try:
+        s = session or requests.Session()
+        resp = s.head(url, timeout=5, verify=False, allow_redirects=True)
+        if resp.ok:
+            return True
+        # Некоторые серверы не поддерживают HEAD — пробуем GET
+        resp = s.get(url, timeout=5, verify=False, stream=True)
+        return resp.ok
+    except Exception:
+        return False
 
 
 def get_last_check() -> datetime:
@@ -490,7 +678,10 @@ def _parse_feed_entries(text: str) -> list[dict]:
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
             summary = (item.findtext("description") or "").strip()
-            entries.append({"title": title, "link": link, "summary": summary})
+            published = (item.findtext("pubDate") or item.findtext("date") or "").strip()
+            entries.append(
+                {"title": title, "link": link, "summary": summary, "published": published}
+            )
         return entries
 
     # Atom: <feed xmlns="http://www.w3.org/2005/Atom">
@@ -514,9 +705,37 @@ def _parse_feed_entries(text: str) -> list[dict]:
         summary_el = entry.find(f"{ns_tag}summary") or entry.find(f"{ns_tag}content")
         summary = (summary_el.text or "").strip() if summary_el is not None else ""
 
-        entries.append({"title": title, "link": link, "summary": summary})
+        pub_el = entry.find(f"{ns_tag}published") or entry.find(f"{ns_tag}updated")
+        published = (pub_el.text or "").strip() if pub_el is not None else ""
+
+        entries.append(
+            {"title": title, "link": link, "summary": summary, "published": published}
+        )
 
     return entries
+
+
+def _parse_entry_date(published: str) -> datetime | None:
+    """
+    Парсит дату публикации из RSS (RFC 822: 'Mon, 22 Jun 2026 10:00:00 +0300')
+    или Atom (ISO 8601: '2026-06-22T10:00:00Z'). Возвращает aware datetime в UTC
+    или None, если дату распознать не удалось.
+    """
+    if not published:
+        return None
+    # RFC 822 (RSS pubDate)
+    try:
+        dt = parsedate_to_datetime(published)
+        if dt is not None:
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    # ISO 8601 (Atom)
+    try:
+        dt = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
@@ -553,10 +772,19 @@ def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
             if not feed_entries:
                 continue
 
+            stale_cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_NEWS_AGE_DAYS)
+            skipped_stale = 0
             articles = []
             for entry in feed_entries[:MAX_ARTICLES_PER_SOURCE]:
                 title = (entry.get("title") or "").strip()
                 if not title or len(title) < 10:
+                    continue
+
+                # Фильтр свежести: если дата публикации известна и старше лимита — пропускаем.
+                # Если дату распознать не удалось — оставляем (лучше показать, чем потерять).
+                pub_dt = _parse_entry_date(entry.get("published", ""))
+                if pub_dt is not None and pub_dt < stale_cutoff:
+                    skipped_stale += 1
                     continue
 
                 # summary может содержать HTML — чистим
@@ -571,7 +799,14 @@ def _try_rss(base_url: str, name: str, session: requests.Session) -> list[dict]:
                         "content": summary_text,
                         "url": entry.get("link") or base_url,
                         "source_name": name,
+                        "published": (pub_dt.strftime("%d.%m.%Y") if pub_dt else ""),
                     }
+                )
+
+            if skipped_stale:
+                log.info(
+                    "Источник '%s': пропущено устаревших (старше %d дней): %d",
+                    name, MAX_NEWS_AGE_DAYS, skipped_stale,
                 )
 
             if articles:
@@ -687,7 +922,7 @@ def fetch_site_articles(source: dict, session: requests.Session) -> list[dict]:
 def collect_all_articles(sources: list[dict]) -> list[dict]:
     """
     Обходит все активные источники, собирает до MAX_ARTICLES_PER_SOURCE
-    статей с каждого сайта. Никакой тематической фильтрации — это делает Gemini.
+    статей с каждого сайта. Никакой тематической фильтрации — это делает DeepSeek.
     """
     session = make_session()
     all_articles: list[dict] = []
@@ -827,8 +1062,8 @@ def merge_into_pool(
 ) -> list[dict]:
     """
     Добавляет новые статьи в пул (дедупликация по URL).
-    Удаляет статьи, которые: уже использованы И старше POOL_MAX_AGE_DAYS дней.
-    Неиспользованные статьи хранятся пока не будут опубликованы.
+    Удаляет ВСЕ статьи старше POOL_MAX_AGE_DAYS дней — и использованные, и нет.
+    Это не даёт старым (в т.ч. прошлогодним) новостям всплывать как «свежие».
     """
     existing_urls = {a.get("url", "") for a in pool}
     added = 0
@@ -845,12 +1080,12 @@ def merge_into_pool(
         existing_urls.add(url)
         added += 1
 
-    # Очистка: удаляем использованные статьи старше POOL_MAX_AGE_DAYS
+    # Очистка: удаляем ВСЕ статьи старше POOL_MAX_AGE_DAYS (использованные и нет)
     cutoff_str = (now_msk - timedelta(days=POOL_MAX_AGE_DAYS)).isoformat()
     before = len(pool)
     pool = [
         a for a in pool
-        if not a.get("used") or a.get("collected_at", "") > cutoff_str
+        if a.get("collected_at", "") > cutoff_str
     ]
     purged = before - len(pool)
 
@@ -862,80 +1097,62 @@ def merge_into_pool(
     return pool
 
 
-def get_today_counts(pool: list[dict], today_str: str) -> tuple[int, int]:
-    """
-    Считает сколько земельных и водных постов уже выбрано/опубликовано сегодня.
-    Ориентируется на поле 'used_at' в пуле — ставится при выборе статьи для генерации.
-    """
-    land = water = 0
-    for a in pool:
-        used_at = a.get("used_at", "")
-        if not used_at or not used_at.startswith(today_str):
-            continue
-        cat = a.get("category", "land")
-        if cat == "water":
-            water += 1
-        else:  # land или both → засчитываем в земельные
-            land += 1
-    return land, water
-
-
-def select_one_post_from_pool(pool: list[dict], today_str: str) -> dict | None:
-    """
-    Выбирает ОДНУ статью для текущего сеанса на основе суточной квоты:
-      LAND_POSTS_COUNT земельных + WATER_POSTS_COUNT водных в день.
-
-    Стратегия: приоритет — водная статья (их меньше в пуле), затем земельная.
-    Если нужной категории нет → пробуем другую (не оставляем слот пустым).
-    Возвращает None если суточная квота выполнена или пул пуст.
-    """
-    land_today, water_today = get_today_counts(pool, today_str)
-    log.info(
-        "Суточная квота — земельных: %d/%d, водных: %d/%d",
-        land_today, LAND_POSTS_COUNT, water_today, WATER_POSTS_COUNT,
+def get_today_used_count(pool: list[dict], today_str: str) -> int:
+    """Считает сколько постов уже выбрано/опубликовано сегодня."""
+    return sum(
+        1 for a in pool
+        if a.get("used_at", "").startswith(today_str)
     )
 
-    need_land  = land_today  < LAND_POSTS_COUNT
-    need_water = water_today < WATER_POSTS_COUNT
 
-    if not need_land and not need_water:
-        log.info("Суточная квота постов выполнена — в этот сеанс пост не нужен")
-        return None
+def _sort_by_priority(articles: list[dict]) -> list[dict]:
+    """
+    Сортирует статьи по приоритету:
+    1. Федеральные (не региональные) — выше
+    2. Свежие — выше (collected_at desc)
+    Двухпроходная стабильная сортировка: сначала по дате desc, затем по региональности asc.
+    """
+    # Проход 1: свежие первыми
+    result = sorted(articles, key=lambda a: a.get("collected_at", ""), reverse=True)
+    # Проход 2: федеральные (regional=False) первыми, региональные — в конце
+    result = sorted(result, key=lambda a: is_regional(a))
+    return result
 
-    # Неиспользованные статьи, от свежих к старым
-    unused = sorted(
-        [a for a in pool if not a.get("used")],
-        key=lambda a: a.get("collected_at", ""),
-        reverse=True,
-    )
 
+def select_posts_from_pool(
+    pool: list[dict], today_str: str, count: int = 1
+) -> list[dict]:
+    """
+    Выбирает N неиспользованных статей из пула.
+    Приоритет: федеральные новости > региональные, свежие > старые.
+    Возвращает [] если пул пуст или дневной лимит исчерпан.
+    """
+    used_today = get_today_used_count(pool, today_str)
+    remaining = MAX_REGULAR_POSTS_PER_DAY - used_today
+    log.info("Сегодня использовано: %d/%d постов", used_today, MAX_REGULAR_POSTS_PER_DAY)
+
+    if remaining <= 0 and count == 1:
+        # Лимит применяется только к обычным постам (count=1).
+        # Вечерний саммари (count=SUMMARY_POST_ARTICLES) выходит независимо от лимита.
+        log.info("Суточный лимит обычных постов исчерпан")
+        return []
+
+    # Неиспользованные, отсортированные по приоритету
+    unused = [a for a in pool if not a.get("used")]
     if not unused:
         log.warning("Пул статей пуст — нет материалов для поста")
-        return None
+        return []
 
-    # Приоритет: сначала закрываем водный слот (он редкий)
-    if need_water:
-        for a in unused:
-            if a.get("category") in ("water", "both"):
-                log.info("Выбрана водная статья: %s", (a.get("title") or "")[:70])
-                return a
-        # Водных нет — используем земельную вместо (если земельный слот тоже нужен)
-        if need_land:
-            log.warning("Водных статей нет — берём земельную вместо водной")
-            for a in unused:
-                if a.get("category") in ("land", "both"):
-                    log.info("Выбрана земельная статья: %s", (a.get("title") or "")[:70])
-                    return a
+    # Сортируем: федеральные первыми, потом по свежести
+    prioritized = _sort_by_priority(unused)
 
-    # Земельный слот
-    if need_land:
-        for a in unused:
-            if a.get("category") in ("land", "both"):
-                log.info("Выбрана земельная статья: %s", (a.get("title") or "")[:70])
-                return a
-
-    log.warning("Подходящих статей в пуле не найдено")
-    return None
+    selected = prioritized[:count]
+    log.info(
+        "Выбрано %d статей из пула (запрошено %d): %s",
+        len(selected), count,
+        [a.get("title", "")[:50] for a in selected],
+    )
+    return selected
 
 
 def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
@@ -1023,16 +1240,48 @@ def filter_relevant_with_deepseek(articles: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def generate_post(article: dict) -> str:
-    """Генерирует готовый пост через DeepSeek API."""
-    prompt = DEEPSEEK_POST_PROMPT.format(
+def generate_post(article: dict, post_type: str = "regular") -> str:
+    """
+    Генерирует готовый пост через DeepSeek API.
+    post_type: "regular" или "humorous" — определяет промпт.
+    """
+    now_msk = moscow_now()
+    template = DEEPSEEK_HUMOROUS_POST_PROMPT if post_type == "humorous" else DEEPSEEK_POST_PROMPT
+    prompt = template.format(
         title=article.get("title", "Без заголовка"),
         content=(article.get("content") or "")[:2000],
         source_name=article.get("source_name", ""),
         url=article.get("url", ""),
+        published=article.get("published") or "не указана",
+        today=now_msk.strftime("%d.%m.%Y"),
+        year=now_msk.strftime("%Y"),
+        prev_year=str(now_msk.year - 1),
     )
 
-    log.info("Генерирую пост: «%s»", (article.get("title") or "")[:70])
+    log.info("Генерирую %s пост: «%s»", post_type, (article.get("title") or "")[:70])
+    return deepseek_generate(prompt)
+
+
+def generate_summary_post(articles: list[dict]) -> str:
+    """Генерирует вечерний саммари-пост по нескольким статьям."""
+    articles_block = ""
+    for i, a in enumerate(articles, start=1):
+        articles_block += (
+            f"\n{i}. ЗАГОЛОВОК: {a.get('title', 'Без заголовка')}\n"
+            f"   ТЕКСТ/АНОНС: {(a.get('content') or '')[:500]}\n"
+            f"   ИСТОЧНИК: {a.get('source_name', '')}\n"
+            f"   ССЫЛКА: {a.get('url', '')}\n"
+        )
+
+    now_msk = moscow_now()
+    prompt = DEEPSEEK_SUMMARY_POST_PROMPT.format(
+        count=len(articles),
+        articles_block=articles_block,
+        today=now_msk.strftime("%d.%m.%Y"),
+        year=now_msk.strftime("%Y"),
+    )
+
+    log.info("Генерирую саммари-пост по %d новостям", len(articles))
     return deepseek_generate(prompt)
 
 
@@ -1107,11 +1356,13 @@ def main() -> None:
     now_utc = datetime.now(timezone.utc)
     now_msk = now_utc + MOSCOW_OFFSET
     last_check = get_last_check()
+    post_type = detect_post_type(now_msk)
 
     log.info("Текущее время (МСК): %s", now_msk.strftime("%Y-%m-%d %H:%M"))
     log.info("Последняя проверка:  %s", last_check.isoformat())
+    log.info("Тип поста: %s", post_type)
 
-    # 1. Проверяем наличие DeepSeek API ключа сразу — он нужен для обоих шагов
+    # 1. Проверяем наличие DeepSeek API ключа
     if not DEEPSEEK_API_KEY:
         log.error(
             "DEEPSEEK_API_KEY не установлен. "
@@ -1128,105 +1379,138 @@ def main() -> None:
         save_last_check(now_utc)
         return
 
-    # 3. Собираем все статьи без фильтрации по ключевым словам
+    # 3. Собираем все статьи
     all_articles = collect_all_articles(sources)
 
     if not all_articles:
         log.info("Ни одной статьи не собрано ни с одного источника")
-        content = build_output([], now_msk, len(sources))
-        save_output(content, now_msk)
-        save_last_check(now_utc)
-        return
-
-    # 4. Пре-фильтрация по ключевым словам — отсекаем заведомо нерелевантное до Gemini
-    prefiltered = pre_filter_by_keywords(all_articles)
-    log.info(
-        "Пре-фильтрация по ключевым словам: %d -> %d статей",
-        len(all_articles), len(prefiltered),
-    )
-
-    if not prefiltered:
-        log.info("После keyword-фильтрации статей не осталось — нет релевантных материалов")
-        content = build_output([], now_msk, len(sources))
-        save_output(content, now_msk)
-        save_last_check(now_utc)
-        return
-
-    # Сохраняем кэш для regen.py — повторная генерация без парсинга источников
-    try:
-        POSTS_DIR.mkdir(exist_ok=True)
-        ARTICLES_CACHE_FILE.write_text(
-            json.dumps(prefiltered, ensure_ascii=False, indent=2), encoding="utf-8"
+        # Всё равно проверяем пул — в нём могут быть статьи от предыдущих запусков
+        pool = load_articles_pool()
+    else:
+        # 4. Пре-фильтрация по ключевым словам
+        prefiltered = pre_filter_by_keywords(all_articles)
+        log.info(
+            "Пре-фильтрация по ключевым словам: %d -> %d статей",
+            len(all_articles), len(prefiltered),
         )
-        log.info("Кэш статей сохранён: %d записей → %s", len(prefiltered), ARTICLES_CACHE_FILE.name)
-    except Exception as exc:
-        log.warning("Не удалось сохранить кэш статей: %s", exc)
 
-    # 5. Финальная фильтрация через DeepSeek — возвращает все релевантные (без лимита)
-    relevant = filter_relevant_with_deepseek(prefiltered)
+        # Сохраняем кэш для regen.py
+        try:
+            POSTS_DIR.mkdir(exist_ok=True)
+            ARTICLES_CACHE_FILE.write_text(
+                json.dumps(prefiltered, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            log.info("Кэш статей сохранён: %d записей → %s", len(prefiltered), ARTICLES_CACHE_FILE.name)
+        except Exception as exc:
+            log.warning("Не удалось сохранить кэш статей: %s", exc)
 
-    # 6. Обновляем накопительный пул статей
-    #    - Добавляем новые релевантные статьи (дедупликация по URL)
-    #    - Удаляем устаревшие использованные записи
-    pool = load_articles_pool()
-    pool = merge_into_pool(pool, relevant, now_msk)
+        # 5. Финальная фильтрация через DeepSeek
+        if prefiltered:
+            relevant = filter_relevant_with_deepseek(prefiltered)
+        else:
+            relevant = []
 
-    # 7. Выбираем 1 статью для текущего сеанса на основе суточной квоты
-    #    (2 земельных + 1 водный в день; если нужной категории нет — берём из пула прошлых запусков)
+        # 6. Обновляем накопительный пул (дедупликация по URL)
+        pool = load_articles_pool()
+        pool = merge_into_pool(pool, relevant, now_msk)
+
     today_str = now_msk.strftime("%Y-%m-%d")
-    selected = select_one_post_from_pool(pool, today_str)
 
-    if selected is None:
-        # Квота выполнена или пул пуст — сохраняем пул с новыми статьями, пост не генерируем
+    # 7. Выбираем статьи из пула в зависимости от типа поста
+    if post_type == "summary":
+        # Вечерний саммари: берём 5 неиспользованных статей
+        selected_list = select_posts_from_pool(pool, today_str, count=SUMMARY_POST_ARTICLES)
+    else:
+        # Обычный или юмористический: берём 1 статью
+        selected_list = select_posts_from_pool(pool, today_str, count=1)
+
+    if not selected_list:
         save_articles_pool(pool)
         content = build_output([], now_msk, len(sources))
         save_output(content, now_msk)
         save_last_check(now_utc)
         return
 
-    # Отмечаем выбранную статью как использованную с временной меткой
+    # Отмечаем выбранные статьи как использованные
+    selected_urls = {a["url"] for a in selected_list}
     for a in pool:
-        if a.get("url") == selected["url"]:
-            a["used"]    = True
+        if a.get("url") in selected_urls:
+            a["used"] = True
             a["used_at"] = now_msk.isoformat()
     save_articles_pool(pool)
 
-    to_generate = [selected]
+    # 8. Валидация ссылок — убираем нерабочие URL из постов
+    session = make_session()
+    for article in selected_list:
+        url = article.get("url", "")
+        if url and not validate_url(url, session):
+            log.warning("Ссылка не работает, убираю из поста: %s", url)
+            article["url"] = ""  # Пустая ссылка — не будет включена в пост
 
-    # 8. Генерируем пост для выбранной статьи
+    # 9. Генерация постов
     articles_with_posts: list[tuple] = []
 
-    for article in to_generate:
+    if post_type == "summary":
+        # Саммари-пост: один пост с несколькими новостями
         try:
-            post_text = generate_post(article)
+            post_text = generate_summary_post(selected_list)
 
-            # Генерируем изображение если задан OPENAI_API_KEY
             image_path = None
             if OPENAI_API_KEY:
                 img_prompt = extract_image_prompt(post_text)
                 if img_prompt:
-                    image_path = generate_image(
-                        img_prompt, now_msk, len(articles_with_posts) + 1
-                    )
-                else:
-                    log.debug("Промпт для изображения не найден в посте — пропускаю генерацию")
+                    image_path = generate_image(img_prompt, now_msk, 1)
 
-            articles_with_posts.append((article, post_text, image_path))
-            time.sleep(2)  # Пауза между вызовами DeepSeek API
+            # Для саммари используем первую статью как «представителя» в метаданных
+            meta_article = {
+                "title": f"Дайджест дня: {len(selected_list)} новостей",
+                "source_name": "Саммари",
+                "url": "",
+            }
+            articles_with_posts.append((meta_article, post_text, image_path))
         except Exception as exc:
-            log.error(
-                "Ошибка генерации поста для «%s»: %s",
-                (article.get("title") or "")[:60],
-                exc,
-            )
+            log.error("Ошибка генерации саммари-поста: %s", exc)
+    else:
+        # Обычный или юмористический — по одному посту
+        for article in selected_list:
+            try:
+                post_text = generate_post(article, post_type=post_type)
 
-    # 9. Сохраняем результат
+                # Модель решила, что материал устарел / неподходящий — не публикуем
+                if post_text.strip().upper().startswith("SKIP"):
+                    log.info(
+                        "Материал отклонён моделью как неактуальный (SKIP): «%s»",
+                        (article.get("title") or "")[:70],
+                    )
+                    continue
+
+                image_path = None
+                if OPENAI_API_KEY:
+                    img_prompt = extract_image_prompt(post_text)
+                    if img_prompt:
+                        image_path = generate_image(
+                            img_prompt, now_msk, len(articles_with_posts) + 1
+                        )
+
+                articles_with_posts.append((article, post_text, image_path))
+                time.sleep(2)
+            except Exception as exc:
+                log.error(
+                    "Ошибка генерации поста для «%s»: %s",
+                    (article.get("title") or "")[:60],
+                    exc,
+                )
+
+    # 10. Сохраняем результат
     content = build_output(articles_with_posts, now_msk, len(sources))
     save_output(content, now_msk)
     save_last_check(now_utc)
 
     log.info("=" * 60)
-    log.info("Мониторинг завершён. Сформировано постов: %d", len(articles_with_posts))
+    log.info(
+        "Мониторинг завершён. Тип: %s. Сформировано постов: %d",
+        post_type, len(articles_with_posts),
+    )
     log.info("=" * 60)
 
 
