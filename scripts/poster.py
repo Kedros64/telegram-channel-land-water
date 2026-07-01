@@ -84,33 +84,71 @@ def log_error(filename: str, error: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Технический «хвост» поста (визуал / варианты CTA / служебные поля) — публиковать
+# его НЕЛЬЗЯ. Отрезаем по первому маркеру, не завися от регистра и markdown-разметки,
+# т.к. модель пишет то «**ВИЗУАЛ:**», то «Визуал:», то «Prompt (EN):» без заголовка.
+_TAIL_RE = re.compile(
+    r"(?im)^[ \t]*[*#>_\-\s]*"
+    r"(вариан\w*\s+cta|cta\s*[:(]|визуал\w*|prompt\s*\(\s*en\s*\)"
+    r"|описан\w*\s*\(\s*ru\s*\)|запасн\w+\s+вариант)"
+)
+# Строки-метаданные, добавляемые build_output перед текстом поста
+_META_RE = re.compile(r"(?im)^[ \t]*\*\*(источник|суть|изображение)\s*:\*\*.*$")
+# Маркер начала поста — может отсутствовать или быть без ** / с # / с двоеточием
+_MARKER_RE = re.compile(r"(?im)^[ \t]*[*#_]{0,3}\s*готовый\s+пост\s*:?\s*[*#_]{0,3}[ \t]*$")
+# Преамбула модели вида «Вот пост, написанный …» / «Вот готовый пост …»
+_PREAMBLE_RE = re.compile(r"(?im)^[ \t]*вот\b[^\n]*\bпост\w*\b[^\n]*$")
+_SEP_LINES = {"---", "***", "* * *", "___"}
+
+
+def _clean_post_body(section: str) -> str:
+    """
+    Достаёт чистый текст поста из секции «## Пост N», устойчиво к вариациям
+    формата модели: маркер «ГОТОВЫЙ ПОСТ» может отсутствовать или быть без **,
+    а хвост (Визуал / Prompt (EN) / Варианты CTA / Описание / Запасной вариант)
+    может быть в любом регистре и разметке — он всегда отрезается.
+    """
+    text = _META_RE.sub("", section)          # убрать строки Источник/Суть/ИЗОБРАЖЕНИЕ
+    marker = _MARKER_RE.search(text)
+    if marker:                                # есть «ГОТОВЫЙ ПОСТ» — берём всё после него
+        text = text[marker.end():]
+    tail = _TAIL_RE.search(text)
+    if tail:                                  # отрезаем визуал/CTA-хвост
+        text = text[:tail.start()]
+
+    lines = text.splitlines()
+    # снять ведущие разделители, пустые строки и преамбулу «Вот пост…»
+    while lines and (
+        not lines[0].strip()
+        or lines[0].strip() in _SEP_LINES
+        or _PREAMBLE_RE.match(lines[0])
+    ):
+        lines.pop(0)
+    # снять хвостовые разделители и пустые строки
+    while lines and (not lines[-1].strip() or lines[-1].strip() in _SEP_LINES):
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
 def extract_posts(content: str) -> list[tuple[str, str | None]]:
     """
-    Извлекает все блоки «ГОТОВЫЙ ПОСТ:» из markdown-файла.
-    Возвращает список кортежей (текст_поста, имя_файла_изображения_или_None).
+    Извлекает посты из markdown-файла мониторинга. Для каждого блока «## Пост N»
+    возвращает (текст_поста, имя_файла_изображения_или_None).
+    Устойчив к отсутствию маркера «ГОТОВЫЙ ПОСТ» и к вариациям «Визуал»/«CTA»,
+    чтобы пост всегда публиковался, а технический хвост никогда не утекал.
     """
-    # Разбиваем на блоки по разделителю "## Пост N"
-    # Каждый блок содержит метаданные поста + текст + опциональное **ИЗОБРАЖЕНИЕ:**
-    post_pattern = re.compile(
-        r"\*\*ГОТОВЫЙ ПОСТ:\*\*\s*\n(.*?)(?=\n\*\*ВАРИАНТЫ CTA|\n\*\*ВИЗУАЛ:|\n\*\*CTA|\n---|\n## Пост\s|\Z)",
-        re.DOTALL,
-    )
     image_pattern = re.compile(r"\*\*ИЗОБРАЖЕНИЕ:\*\*\s*(\S+\.png)")
-
-    # Разбиваем на секции "## Пост N" чтобы матчить изображение к нужному посту
-    sections = re.split(r"\n---\n\n## Пост \d+\n", content)
+    sections = re.split(r"##\s*Пост\s*\d+", content)
 
     results = []
     for section in sections:
-        post_match = post_pattern.search(section)
-        if not post_match:
-            continue
-        post_text = post_match.group(1).strip()
-        if not post_text:
-            continue
+        if "**Источник:**" not in section:
+            continue  # шапка файла или «релевантных материалов не найдено»
         img_match = image_pattern.search(section)
         image_filename = img_match.group(1).strip() if img_match else None
-        results.append((post_text, image_filename))
+        body = _clean_post_body(section)
+        if body:
+            results.append((body, image_filename))
 
     return results
 
