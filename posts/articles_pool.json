@@ -590,7 +590,8 @@
     "source_name": "uristpozemle",
     "collected_at": "2026-06-30T12:59:11.310653+00:00",
     "category": "land",
-    "used": false
+    "used": true,
+    "used_at": "2026-07-01T19:38:47.720630+00:00"
   },
   {
     "title": "Channel name was changed to « ⚖️ ЗЕМЕЛЬНОЕ БЮРО 🌍 Новосибирск »",
