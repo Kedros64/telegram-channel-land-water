@@ -231,15 +231,21 @@ DEEPSEEK_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-обложку в стиле YouTube-превью, 16:9:
-кричаще насыщенные цвета, высокий контраст, драматичный кинематографичный свет; один чёткий
-центр — крупный герой с яркой эмоцией (удивление/тревога/азарт), собирательный образ без реальных
-личностей; ключевой объект по теме поста подсвечен большой красной стрелкой или кругом; глянцевый
-«обложечный» вид. В КОНЦЕ добавь короткую подпись CAPS из 1–3 слов по сути поста в кавычках, например:
-bold Russian caption: «ЧЬЯ ВОДА?». Кроме этой одной подписи — НИКАКОГО другого текста, без водяных
-знаков, логотипов и случайных букв.]
+Формат: [ВЫБЕРИ одно слово по содержанию поста: card — если пост про закон/чек-лист/этапы/схему/«что проверить»
+(вертикальная экспертная карточка с заголовком и структурой); photo — если пост про объект или сцену
+(пруд, ГТС, участок, река, карта, люди за делом).]
+Prompt (EN): [ОДНОЙ СТРОКОЙ на английском, в зависимости от Формата:
+— photo: кликбейт-кадр — кричаще насыщенные цвета, высокий контраст, драматичный свет, один чёткий центр
+(крупный герой с яркой эмоцией, собирательный образ без реальных личностей), ключевой объект подсвечен
+красной стрелкой/кругом, глянец; в конце короткая подпись CAPS 1–3 слова в кавычках, напр. bold Russian
+caption: «ЧЬЯ ВОДА?».
+— card: яркая вертикальная инфографика-карточка — крупный ЗАГОЛОВОК сверху и 3–4 КОРОТКИХ пункта/шага
+или иконки ниже (чек-лист/этапы), чистый современный стиль, высокий контраст; текст короткий, напр.
+заголовок «ПРУД: 4 ШАГА».
+ЛЮБОЙ текст должен ЦЕЛИКОМ помещаться в кадр с отступами от краёв (не обрезать!). Кроме заголовка/подписи —
+никакого лишнего текста, без водяных знаков и логотипов.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [та же кликбейт-обложка, но проще, одной строкой, с той же короткой подписью CAPS]
+Запасной вариант: [тот же Формат, но проще, одной строкой, с тем же коротким текстом внутри кадра]
 """
 
 DEEPSEEK_HUMOROUS_POST_PROMPT = """\
@@ -286,14 +292,15 @@ DEEPSEEK_HUMOROUS_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-обложку в стиле YouTube-превью, 16:9,
-но ЮМОРИСТИЧЕСКУЮ: кричаще насыщенные цвета, высокий контраст, драматичный свет; крупный герой с
-утрированной комичной эмоцией (собирательный образ, без реальных личностей), забавная или абсурдная
-ситуация по теме; ключевой объект подсвечен красной стрелкой/кругом; глянец. В КОНЦЕ короткая
-подпись CAPS из 1–3 слов в кавычках, например: bold Russian caption: «НУ ВОТ ОПЯТЬ». Кроме этой одной
+Формат: photo
+Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском ЮМОРИСТИЧЕСКИЙ кликбейт-кадр: кричаще насыщенные цвета,
+высокий контраст, драматичный свет; крупный герой с утрированной комичной эмоцией (собирательный образ,
+без реальных личностей), забавная или абсурдная ситуация по теме; ключевой объект подсвечен красной
+стрелкой/кругом; глянец. В КОНЦЕ короткая подпись CAPS из 1–3 слов в кавычках, например: bold Russian
+caption: «НУ ВОТ ОПЯТЬ». Подпись должна ЦЕЛИКОМ помещаться в кадр с отступами от краёв. Кроме этой одной
 подписи — никакого другого текста, без водяных знаков, логотипов и случайных букв.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [та же юмористическая кликбейт-обложка, но проще, одной строкой, с короткой подписью CAPS]
+Запасной вариант: [та же юмористическая кликбейт-обложка, но проще, одной строкой, с короткой подписью CAPS внутри кадра]
 """
 
 DEEPSEEK_SUMMARY_POST_PROMPT = """\
@@ -338,12 +345,13 @@ DEEPSEEK_SUMMARY_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-обложку в стиле YouTube-превью, 16:9:
-яркий динамичный коллаж из {count} панелей, в каждой — своя контрастная сцена по одной из тем дня
-(природа/вода/земля), кричаще насыщенные цвета, высокий контраст, драматичный свет, глянец; панели
-разделены жирными яркими линиями. Сверху — крупная подпись-хук CAPS из 1–2 слов в кавычках, например:
-bold Russian caption: «ГЛАВНОЕ ЗА ДЕНЬ». Кроме этой одной подписи — никакого другого текста, без водяных
-знаков и логотипов.]
+Формат: photo
+Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-коллаж: яркий динамичный коллаж из {count} панелей,
+в каждой — своя контрастная сцена по одной из тем дня (природа/вода/земля), кричаще насыщенные цвета,
+высокий контраст, драматичный свет, глянец; панели разделены жирными яркими линиями. Сверху — крупная
+подпись-хук CAPS из 1–2 слов в кавычках, например: bold Russian caption: «ГЛАВНОЕ ЗА ДЕНЬ». Подпись должна
+ЦЕЛИКОМ помещаться в кадр с отступами от краёв. Кроме этой одной подписи — никакого другого текста, без
+водяных знаков и логотипов.]
 Описание (RU): [2–3 слова]
 Запасной вариант: [одна яркая кликбейт-сцена, объединяющая темы земли и воды, одной строкой, с той же подписью CAPS]
 """
@@ -402,9 +410,30 @@ def extract_image_prompt(post_text: str) -> str:
     return ""
 
 
-def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None:
+def extract_image_format(post_text: str) -> str:
+    """
+    Читает поле «Формат:» из секции ВИЗУАЛ: 'card' (вертикальная экспертная карточка)
+    или 'photo' (фото объекта). По умолчанию 'photo'.
+    """
+    m = re.search(r"(?im)^\s*\*{0,2}Формат\s*:?\*{0,2}\s*(card|photo|карточк\w*|фото)\b", post_text)
+    if not m:
+        return "photo"
+    val = m.group(1).lower()
+    return "card" if val.startswith(("card", "карточ")) else "photo"
+
+
+# Размер картинки под тип визуала (gpt-image-1 поддерживает только эти три):
+#   card  → 1024x1536 (вертикаль 2:3, удобно читать с телефона, влезает заголовок/структура)
+#   photo → 1024x1024 (квадрат 1:1, важные детали не режутся по краям)
+IMAGE_SIZE_BY_FORMAT = {"card": "1024x1536", "photo": "1024x1024"}
+
+
+def generate_image(
+    prompt: str, now_msk: datetime, post_num: int, image_format: str = "photo"
+) -> Path | None:
     """
     Генерирует изображение через OpenAI Images API (gpt-image-1-mini).
+    image_format: 'card' (вертикаль 2:3) или 'photo' (квадрат 1:1).
     Сохраняет PNG в posts/YYYY-MM-DD_HH_post_N.png.
     При любой ошибке логирует предупреждение и возвращает None —
     пост в любом случае будет опубликован, просто без картинки.
@@ -413,18 +442,28 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
         log.debug("OPENAI_API_KEY не задан — генерация изображений пропущена")
         return None
 
-    # Подкрепление кликбейт-стиля прямо в конце промпта (на случай, если модель текста
-    # выдала слабое описание). Разрешаем ТОЛЬКО одну короткую подпись-хук из промпта,
-    # остальной текст/водяные знаки/логотипы запрещаем, чтобы не было мусорных букв.
-    style_suffix = (
-        " Bold eye-catching YouTube-thumbnail style: hyper-saturated colors, very high contrast, "
-        "dramatic cinematic lighting, one clear focal subject with exaggerated emotion, glossy finish, "
-        "16:9 composition. Only the single short caption specified above may appear as text; "
-        "no other text, no watermark, no logo, no gibberish lettering."
-    )
+    size = IMAGE_SIZE_BY_FORMAT.get(image_format, "1024x1024")
+
+    # Подкрепление стиля + КРИТИЧНО: весь текст должен целиком помещаться в кадр с
+    # запасом от краёв (была обрезка подписи слева). Разрешаем только заданную подпись.
+    if image_format == "card":
+        style_suffix = (
+            " Clean bold infographic card style, vertical, high readability on a phone: "
+            "strong heading at the top, clear structured layout. Bright, high contrast, modern. "
+            "Keep ALL text fully inside the frame with generous safe margins — never crop or "
+            "touch the edges. No watermark, no logo, no gibberish lettering."
+        )
+    else:
+        style_suffix = (
+            " Bold eye-catching thumbnail style: hyper-saturated colors, very high contrast, "
+            "dramatic cinematic lighting, one clear focal subject with exaggerated emotion, glossy finish. "
+            "Only the single short caption specified above may appear as text, and it MUST fit entirely "
+            "inside the frame with comfortable safe margins — never cut off at the edges. "
+            "No other text, no watermark, no logo, no gibberish lettering."
+        )
     final_prompt = prompt[:820].rstrip() + style_suffix
 
-    log.info("Генерирую изображение для поста %d…", post_num)
+    log.info("Генерирую изображение для поста %d (формат=%s, %s)…", post_num, image_format, size)
     try:
         resp = requests.post(
             "https://api.openai.com/v1/images/generations",
@@ -435,11 +474,11 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
             json={
                 "model": OPENAI_IMAGE_MODEL,
                 "prompt": final_prompt[:1000],  # API limit
-                "size": "1536x1024",   # широкий «обложечный» кадр 3:2
+                "size": size,
                 "quality": "medium",   # сочнее и чётче текста, чем low
                 "n": 1,
             },
-            timeout=90,
+            timeout=120,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -1483,7 +1522,8 @@ def main() -> None:
             if OPENAI_API_KEY:
                 img_prompt = extract_image_prompt(post_text)
                 if img_prompt:
-                    image_path = generate_image(img_prompt, now_msk, 1)
+                    img_fmt = extract_image_format(post_text)
+                    image_path = generate_image(img_prompt, now_msk, 1, img_fmt)
 
             # Для саммари используем первую статью как «представителя» в метаданных
             meta_article = {
@@ -1512,8 +1552,9 @@ def main() -> None:
                 if OPENAI_API_KEY:
                     img_prompt = extract_image_prompt(post_text)
                     if img_prompt:
+                        img_fmt = extract_image_format(post_text)
                         image_path = generate_image(
-                            img_prompt, now_msk, len(articles_with_posts) + 1
+                            img_prompt, now_msk, len(articles_with_posts) + 1, img_fmt
                         )
 
                 articles_with_posts.append((article, post_text, image_path))
