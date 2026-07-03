@@ -231,14 +231,15 @@ DEEPSEEK_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Photorealistic editorial photo, natural lighting, high detail, realistic colors.
-Передай атмосферу поста через ПРИРОДУ, ЛАНДШАФТ, ВОДУ, ЛЮДЕЙ ЗА ДЕЛОМ.
-СТРОГО ЗАПРЕЩЕНО включать любые носители текста: вывески, таблички, указатели, дорожные и
-информационные знаки, документы, бумаги, газеты, экраны, плакаты, баннеры, надписи, логотипы, цифры.
-no text, no letters, no words, no signs, no signboards, no labels, no documents, no posters,
-no banners, no watermark, no logo. Если есть люди — собирательные образы, без известных личностей.]
+Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-обложку в стиле YouTube-превью, 16:9:
+кричаще насыщенные цвета, высокий контраст, драматичный кинематографичный свет; один чёткий
+центр — крупный герой с яркой эмоцией (удивление/тревога/азарт), собирательный образ без реальных
+личностей; ключевой объект по теме поста подсвечен большой красной стрелкой или кругом; глянцевый
+«обложечный» вид. В КОНЦЕ добавь короткую подпись CAPS из 1–3 слов по сути поста в кавычках, например:
+bold Russian caption: «ЧЬЯ ВОДА?». Кроме этой одной подписи — НИКАКОГО другого текста, без водяных
+знаков, логотипов и случайных букв.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [более простой промпт в том же стиле, без любых носителей текста, no text, no letters]
+Запасной вариант: [та же кликбейт-обложка, но проще, одной строкой, с той же короткой подписью CAPS]
 """
 
 DEEPSEEK_HUMOROUS_POST_PROMPT = """\
@@ -285,13 +286,14 @@ DEEPSEEK_HUMOROUS_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Photorealistic editorial photo, natural lighting, high detail, realistic colors.
-HUMOROUS scene — gentle exaggeration or unexpected juxtaposition related to the topic, not offensive.
-СТРОГО ЗАПРЕЩЕНО включать любые носители текста: вывески, таблички, знаки, документы, бумаги, экраны,
-плакаты, баннеры, надписи, логотипы, цифры. no text, no letters, no words, no signs, no labels,
-no documents, no posters, no watermark, no logo. Если есть люди — собирательные образы.]
+Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-обложку в стиле YouTube-превью, 16:9,
+но ЮМОРИСТИЧЕСКУЮ: кричаще насыщенные цвета, высокий контраст, драматичный свет; крупный герой с
+утрированной комичной эмоцией (собирательный образ, без реальных личностей), забавная или абсурдная
+ситуация по теме; ключевой объект подсвечен красной стрелкой/кругом; глянец. В КОНЦЕ короткая
+подпись CAPS из 1–3 слов в кавычках, например: bold Russian caption: «НУ ВОТ ОПЯТЬ». Кроме этой одной
+подписи — никакого другого текста, без водяных знаков, логотипов и случайных букв.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [более простой юмористический промпт, без любых носителей текста, no text, no letters]
+Запасной вариант: [та же юмористическая кликбейт-обложка, но проще, одной строкой, с короткой подписью CAPS]
 """
 
 DEEPSEEK_SUMMARY_POST_PROMPT = """\
@@ -336,9 +338,14 @@ DEEPSEEK_SUMMARY_POST_PROMPT = """\
 Прямой: [вариант]
 
 **ВИЗУАЛ:**
-Prompt (EN): [Photorealistic collage-style image divided into {count} panels, each panel a different nature/landscape/water scene related to one of the topics. Natural lighting, realistic colors. СТРОГО no text, no letters, no words, no captions, no signs, no labels, no documents, no posters, no numbers, no watermark, no logo anywhere. Panels separated by thin plain lines.]
+Prompt (EN): [Напиши ОДНОЙ СТРОКОЙ на английском кликбейт-обложку в стиле YouTube-превью, 16:9:
+яркий динамичный коллаж из {count} панелей, в каждой — своя контрастная сцена по одной из тем дня
+(природа/вода/земля), кричаще насыщенные цвета, высокий контраст, драматичный свет, глянец; панели
+разделены жирными яркими линиями. Сверху — крупная подпись-хук CAPS из 1–2 слов в кавычках, например:
+bold Russian caption: «ГЛАВНОЕ ЗА ДЕНЬ». Кроме этой одной подписи — никакого другого текста, без водяных
+знаков и логотипов.]
 Описание (RU): [2–3 слова]
-Запасной вариант: [single photorealistic landscape combining land and water themes, без любых носителей текста, no text, no letters, no signs]
+Запасной вариант: [одна яркая кликбейт-сцена, объединяющая темы земли и воды, одной строкой, с той же подписью CAPS]
 """
 
 # ---------------------------------------------------------------------------
@@ -381,11 +388,17 @@ def deepseek_generate(prompt: str) -> str:
 def extract_image_prompt(post_text: str) -> str:
     """
     Извлекает английский промпт из секции **ВИЗУАЛ:** сгенерированного поста.
-    Возвращает строку или '' если секция отсутствует.
+    Берёт весь блок Prompt (EN) (может быть в несколько строк) до «Описание (RU)» /
+    «Запасной вариант» / конца. Возвращает строку или '' если секция отсутствует.
     """
-    match = re.search(r"\*{0,2}Prompt \(EN\):\*{0,2}\s*(.+?)(?:\n|$)", post_text)
+    match = re.search(
+        r"\*{0,2}Prompt\s*\(EN\)\*{0,2}\s*:?\s*(.+?)"
+        r"(?=\n\s*\*{0,2}(?:Описан|Запасн|Negative)|\n\s*##|\n\s*---|\Z)",
+        post_text,
+        re.S | re.I,
+    )
     if match:
-        return match.group(1).strip().strip("[]")
+        return match.group(1).strip().strip("[]").strip()
     return ""
 
 
@@ -400,14 +413,16 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
         log.debug("OPENAI_API_KEY не задан — генерация изображений пропущена")
         return None
 
-    # Жёсткое подкрепление запрета текста: модель не принимает отдельный negative_prompt,
-    # поэтому добавляем запрет прямо в конец промпта — действует независимо от текста ВИЗУАЛ.
-    no_text_suffix = (
-        " Strictly NO text, no letters, no words, no captions, no numbers, "
-        "no signs, no signboards, no road signs, no labels, no documents, no papers, "
-        "no posters, no banners, no screens with text, no watermark, no logo anywhere in the image."
+    # Подкрепление кликбейт-стиля прямо в конце промпта (на случай, если модель текста
+    # выдала слабое описание). Разрешаем ТОЛЬКО одну короткую подпись-хук из промпта,
+    # остальной текст/водяные знаки/логотипы запрещаем, чтобы не было мусорных букв.
+    style_suffix = (
+        " Bold eye-catching YouTube-thumbnail style: hyper-saturated colors, very high contrast, "
+        "dramatic cinematic lighting, one clear focal subject with exaggerated emotion, glossy finish, "
+        "16:9 composition. Only the single short caption specified above may appear as text; "
+        "no other text, no watermark, no logo, no gibberish lettering."
     )
-    final_prompt = prompt[:820].rstrip() + no_text_suffix
+    final_prompt = prompt[:820].rstrip() + style_suffix
 
     log.info("Генерирую изображение для поста %d…", post_num)
     try:
@@ -420,8 +435,8 @@ def generate_image(prompt: str, now_msk: datetime, post_num: int) -> Path | None
             json={
                 "model": OPENAI_IMAGE_MODEL,
                 "prompt": final_prompt[:1000],  # API limit
-                "size": "1024x1024",
-                "quality": "low",
+                "size": "1536x1024",   # широкий «обложечный» кадр 3:2
+                "quality": "medium",   # сочнее и чётче текста, чем low
                 "n": 1,
             },
             timeout=90,
