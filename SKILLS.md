@@ -32,7 +32,8 @@ ssh -i bot_key root@$(cat _tw_ipv4.txt) 'cd /opt/app && set -a && . ./.env && se
 ## gen-api.ru (картинки / речь)
 - **Картинка:** `POST /api/v1/networks/nano-banana-2` `{prompt, resolution:"0.5K", aspect_ratio:"1:1", is_sync:false}` → `request_id` → поллить `GET /api/v1/request/get/{id}` (status `success`) → `result[0]` = URL. Заголовок `Authorization: Bearer <GENAPI_KEY>`.
 - **Whisper (STT):** `POST /api/v1/networks/whisper {audio_url}`. Telegram отдаёт голос как `.oga` — gen-api его НЕ принимает; кладём в GitHub как `.ogg` и передаём raw-URL (`github_put_bytes`).
-- Публичного списка моделей нет (каталог на сайте gen-api.ru). **Проверка ключа = реальная мелкая генерация** (эндпоинт `/api/v1/user` даёт ложный «неверный ключ» на рабочем ключе).
+- Публичного списка моделей нет (каталог на сайте gen-api.ru).
+- **Баланс:** `GET https://api.gen-api.ru/api/v1/user` + `Authorization: Bearer <key>` → `{"balance": 95.8, ...}`. Работает (если отдаёт «неверный ключ» — почти наверняка не подставилась переменная окружения, проверь `echo`).
 
 ## Telegram
 - **Публичность канала** (нужно для синхробота Дзена): `getChat?chat_id=-100…` → поле `username` (у нас `pro_zemlyu_i_vodu`).
@@ -42,6 +43,14 @@ ssh -i bot_key root@$(cat _tw_ipv4.txt) 'cd /opt/app && set -a && . ./.env && se
 - `wall.post`: `owner_id = -abs(group_id)`, `from_group=1`, `v=5.199`, `message` = plain (без markdown — есть `channels._plain`), `random_id` уникальный.
 - Фото (3 шага): `photos.getWallUploadServer` (лучше **user-токен админа** — у community-токена бывает **error 27**) → multipart POST файла (поле `photo`) на `upload_url` → `photos.saveWallPhoto` → attachment `photo{owner}_{id}`.
 - Включение канала: env `EXTRA_CHANNELS=vk`, `VK_TOKEN`, `VK_GROUP_ID`, при необходимости `VK_UPLOAD_TOKEN`.
+
+## Мониторинг балансов (ежедневно 10:00 МСК)
+- Код: `scripts/balances.py` (`genapi_balance()`, `timeweb_finances()`) + `bot.balance_watch()` (cron 07:00 UTC).
+- Пороги в env: `GENAPI_MIN_BALANCE` (100 ₽), `SERVER_ALERT_DAYS` (5). Нужен `TIMEWEB_TOKEN` в `/opt/app/.env`.
+- Ручная проверка: команда `/balance` боту; или на сервере:
+  `cd /opt/app && venv/bin/python -c "from dotenv import load_dotenv;load_dotenv('/opt/app/.env');import sys;sys.path.insert(0,'/opt/app');import scripts.balances as b;print(b.genapi_balance(), b.timeweb_finances())"`
+  (⚠️ `load_dotenv()` без пути падает при запуске из stdin — указывай `/opt/app/.env`).
+- Timeweb `hours_left` = на сколько часов хватит баланса при текущем тарифе → это и есть «сколько осталось до отключения».
 
 ## Timeweb (провижн нового сервера)
 - Создать: `POST /servers` `{name, os_id:99 (Ubuntu 24.04), preset_id, bandwidth:100, cloud_init, ssh_keys_ids:[714895]}`. Дешёвые РФ-тарифы: `5039` (ru-2, 1CPU/2GB, 264 ₽/мес).
