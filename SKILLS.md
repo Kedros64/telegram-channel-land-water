@@ -1,7 +1,7 @@
 # SKILLS.md — плейбук проекта (переиспользуемые приёмы)
 
 ## Пути, доступы, окружение
-- **Локальная рабочая копия / источник истины:** `C:\Users\17D3~1\AppData\Local\Temp\claude\landwater-bot\` (это папка сборки: `bot.py`, `scripts/`, `sources.xlsx`, `assets/`, `deploy_secrets.json`, ключи, `_*`-скретчи). ⚠️ Это временная папка сессии — durable-исходник кода лежит в репо `bot/app.tar.gz`.
+- **Локальная рабочая копия / источник истины:** `C:\Users\Денис\Projects\landwater-bot\` (`bot.py`, `scripts/`, `sources.xlsx`, `assets/`, `deploy_secrets.json`, ключи `bot_key`/`tw_token.txt`, `_*`-скретчи). ⚠️ НЕ держать рабочую копию в Temp: 2026-07-16 Windows-очистка Temp удалила старые файлы (requirements, overlay, шрифт, bot_key) — поэтому переехали сюда. Durable-копия кода также в репо `bot/app.tar.gz`.
 - **Секреты:** локально `deploy_secrets.json`; на сервере `/opt/app/.env`.
 - **SSH к серверу:** `ssh -i bot_key -o StrictHostKeyChecking=no root@$(cat _tw_ipv4.txt)` (текущий IP в `_tw_ipv4.txt`, сейчас `201.24.60.189`). Ключ в Timeweb — id `714895`.
 - **Timeweb API:** токен в `tw_token.txt` (заголовок `Authorization: Bearer …`, аккаунт `hk054512`), база `https://api.timeweb.cloud/api/v1`.
